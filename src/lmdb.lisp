@@ -2,43 +2,49 @@
 (defpackage lmdb
   (:use :cl)
   (:shadow :get)
-  ;; Classes
-  (:export :environment
-           :make-environment
-           :transaction
-           :transaction-environment
-           :transaction-parent
-           :make-transaction
-           :database
-           :make-database
-           :cursor
-           :make-cursor)
-  ;; Lifecycle
-  (:export :open-environment
-           :close-environment
-           :begin-transaction
-           :commit-transaction
-           :abort-transaction
-           :open-database
-           :close-database
-           :open-cursor
-           :close-cursor)
-  ;; Macros
-  (:export :with-environment
-           :with-database
-           :with-cursor
-           :do-pairs)
-  ;; Errors
-  (:export :lmdb-error)
-  ;; Methods
-  (:export :version-string
-           :environment-statistics
-           :environment-info
-           :get
-           :put
-           :del
-           :cursor-get)
+  (:export
+   :*environment-class*
+   :*transaction-class*
+   :abort-transaction
+   :begin-transaction
+   :close-cursor
+   :close-database
+   :close-environment
+   :commit-transaction
+   :condition-environment
+   :condition-name
+   :cursor
+   :cursor-get
+   :database
+   :database-maximum-count
+   :database-not-found
+   :del
+   :do-pairs
+   :environment
+   :environment-info
+   :environment-statistics
+   :get
+   :lmdb-error
+   :make-cursor
+   :make-database
+   :make-environment
+   :make-transaction
+   :open-cursor
+   :open-database
+   :open-environment
+   :put
+   :reentrant-cursor-error
+   :renew-transaction
+   :reset-transaction
+   :transaction
+   :transaction-environment
+   :transaction-parent
+   :version-string
+   :with-cursor
+   :with-database
+   :with-environment)
   (:documentation "The high-level LMDB interface."))
+
 (in-package :lmdb)
 
 ;;; Library
@@ -52,6 +58,9 @@
 (cffi:use-foreign-library liblmdb)
 
 ;;; Constants
+
+(defparameter *environment-class* 'environment)
+(defparameter *transaction-class* 'transaction)
 
 (defparameter +permissions+ #o664
   "The Unix permissions to use for the database.")
@@ -92,9 +101,11 @@
   (:documentation "A transaction."))
 
 (defclass database ()
-  ((handle :reader %handle
+  ((handle :accessor %handle
            :initarg :handle
-           :documentation "The DBI handle.")
+           :documentation "The DBI handle.
+            The initial state is unbound, to be set/cleared by open-/close-
+            and tested by with-")
    (transaction :reader database-transaction
                 :initarg :transaction
                 :type transaction
@@ -116,7 +127,7 @@
   data)
 
 (defclass cursor ()
-  ((handle :reader %handle
+  ((handle :accessor %handle
            :initarg :handle
            :documentation "The pointer to the cursor object.")
    (database :reader cursor-database
@@ -127,11 +138,12 @@
 
 ;;; Constructors
 
-(defun make-environment (directory &key (max-databases 1) (mapsize (* 10 1024 1024)))
+(defun make-environment (directory &key (max-databases 1) (mapsize (* 10 1024 1024))
+                                   (class *environment-class*))
   "Create an environment object.
 
 Before an environment can be used, it must be opened with @c(open-environment)."
-  (let ((instance (make-instance 'environment
+  (let ((instance (make-instance class
                                  :handle (cffi:foreign-alloc :pointer)
                                  :directory directory
                                  :max-dbs max-databases)))
@@ -144,18 +156,18 @@ Before an environment can be used, it must be opened with @c(open-environment)."
     (liblmdb:env-set-mapsize (handle instance) mapsize)
     instance))
 
-(defun make-transaction (environment &optional parent)
+(defun make-transaction (environment &key parent (class *transaction-class*))
   "Create a transaction object."
-  (make-instance 'transaction
+  (make-instance class
                  :handle (cffi:foreign-alloc :pointer)
                  :environment environment
                  :parent parent))
 
 (defun make-database (transaction name
                       &key (create t))
-  "Create a database object."
+  "Create a database object.
+   The initial state leaves the handle unbound (see open/close)"
   (make-instance 'database
-                 :handle (cffi:foreign-alloc :pointer)
                  :transaction transaction
                  :name name
                  :create create))
@@ -187,9 +199,9 @@ floats, booleans and strings. Returns a (size . array) pair."
                  :data vector)))
 
 (defun make-cursor (database)
-  "Create a cursor object."
+  "Create a cursor object.
+   The initial state leaves the handle unbound."
   (make-instance 'cursor
-                 :handle (cffi:foreign-alloc :pointer)
                  :database database))
 
 ;;; Errors
@@ -198,10 +210,47 @@ floats, booleans and strings. Returns a (size . array) pair."
   ()
   (:documentation "The base class of all LMDB errors."))
 
+(define-condition lmdb-state-error (lmdb-error)
+  ((object
+    :initarg :object :initform (error "error object is required")
+    :reader condition-object)))
+
+(define-condition environment-error (lmdb-error)
+  ((object
+    :initarg :environment
+    :reader condition-environment)))
+
+(define-condition database-not-found (environment-error cell-error)
+  ()
+  (:documentation "database not found")
+  (:report (lambda (condition stream)
+             (format stream "Database not found, and did not specify :create t: ~s ~s."
+                     (environment-directory (condition-environment condition))
+                     (cell-error-name condition)))))
+
+(define-condition database-maximum-count (environment-error)
+  ()
+  (:documentation "maximum database count reached")
+  (:report (lambda (condition stream)
+             (format stream "Reached maximum number of named databases: ~s."
+                     (environment-directory (condition-environment condition))))))
+
+(define-condition reentrant-cursor-error (lmdb-state-error)
+  ((object
+    :initarg :cursor
+    :reader condition-cursor))
+  (:documentation "The cursor given to open-cursor is already open.")
+  (:report (lambda (condition stream)
+             (format stream "Cursor is already open: ~s."
+                     (condition-cursor condition)))))
+(defun reentrant-cursor-error (&rest args)
+  (apply #'error 'reentrant-cursor-error args))
+
 (defun unknown-error (error-code)
   (error "Unknown error code: ~A. Result from strerror(): ~A"
          error-code
          (liblmdb:strerror error-code)))
+
 
 ;;; Viscera
 
@@ -320,9 +369,41 @@ called by the transaction-creating thread.)
 @end(deflist)"
   (liblmdb:txn-abort (handle transaction)))
 
+(defun renew-transaction (transaction)
+  "Renew the transaction.
+
+@begin(deflist)
+@term(Thread Safety)
+
+@def(A transaction may only be used by a single thread.)
+
+@end(deflist)"
+  (with-slots (env parent) transaction
+    (let ((return-code (liblmdb:txn-renew (%handle transaction))))
+      (alexandria:switch (return-code)
+        (0
+         ;; Success
+         t)
+        ;; TODO rest
+        (t
+         (unknown-error return-code))))))
+
+(defun reset-transaction (transaction)
+  "Reset the transaction.
+
+@begin(deflist)
+@term(Thread Safety)
+
+@def(A transaction may only be used by a single thread.)
+
+@end(deflist)"
+  (liblmdb:txn-reset (%handle transaction)))
+
+
+
 (defun open-database (database)
   "Open a database.
-
+Bind the dbi handle and call dbi-open to set it.
 @begin(deflist)
 @term(Thread Safety)
 
@@ -331,37 +412,51 @@ before another transaction may open it. Multiple concurrent transactions cannot
 open the same database.)
 
 @end(deflist)"
-  (with-slots (transaction name create) database
-    (let ((return-code (liblmdb:dbi-open (handle transaction)
-                                          name
-                                          (logior 0
-                                                  (if create
-                                                      liblmdb:+create+
-                                                      0))
-                                          (%handle database))))
-      (alexandria:switch (return-code)
-        (0
-         ;; Success
-         t)
-        (liblmdb:+notfound+
-         (error "Database not found, and did not specify :create t."))
-        (liblmdb:+dbs-full+
-         (error "Reached maximum number of named databases."))
-        (t
-         (unknown-error return-code)))))
-  database)
-
-(defun open-cursor (cursor)
-  "Open a cursor."
-  (with-slots (database) cursor
-    (with-slots (transaction) database
-      (let ((return-code (liblmdb:cursor-open (handle transaction)
-                                               (handle database)
-                                               (%handle cursor))))
+  (unless (slot-boundp database '%handle)
+    ;; dbi-open claims to be idempotent, but anyway
+    (with-slots (transaction name create) database
+      (let* ((%handle (cffi:foreign-alloc :pointer))
+             (return-code (liblmdb:dbi-open (handle transaction)
+                                            name
+                                            (logior 0
+                                                    (if create
+                                                        liblmdb:+create+
+                                                        0))
+                                            %handle)))
         (alexandria:switch (return-code)
           (0
            ;; Success
            t)
+          (liblmdb:+notfound+
+           (error 'database-not-found :name name :environment (transaction-environment transaction)))
+          (liblmdb:+dbs-full+
+           (error 'database-maximum-count :name name :environment (transaction-environment transaction)))
+          (t
+           (unknown-error return-code))))))
+  database)
+
+(defmethod print-object ((object database) stream)
+  (let ((*print-pretty* nil))
+    (print-unreadable-object (object stream :identity t :type t)
+      (format stream "~s" (if (slot-boundp object 'name)
+                              (slot-value object 'name)
+                              "?")))))
+
+
+(defun open-cursor (cursor)
+  "Open a cursor."
+  (when (slot-boundp cursor '%handle)
+    (reentrant-cursor-error :cursor cursor))
+  (with-slots (database) cursor
+    (with-slots (transaction) database
+      (let* ((%handle (cffi:foreign-alloc :pointer))
+             (return-code (liblmdb:cursor-open (handle transaction)
+                                               (handle database)
+                                               %handle)))
+        (alexandria:switch (return-code)
+          (0
+           ;; Success
+           (setf (%handle cursor) %handle))
           (22
            (error "Invalid parameter."))
           (t
@@ -495,6 +590,51 @@ The @cl:param(operation) argument specifies the operation."
             (t
              (unknown-error return-code))))))))
 
+(defun cursor-get-with (cursor operation continuation)
+  "Extract data using a cursor.
+
+The @cl:param(operation) argument specifies the operation."
+  (declare (dynamic-extent continuation))
+  (let ((op (case operation
+              (:first :+first+)
+              (:current :+current+)
+              (:last :+last+)
+              (:next :+next+)
+              (:prev :+prev+)
+              (:set-range :+set-range+))))
+    (with-empty-value (raw-key)
+      (with-empty-value (raw-value)
+        (let ((return-code (liblmdb:cursor-get (handle cursor)
+                                                raw-key
+                                                raw-value
+                                                op)))
+          (alexandria:switch (return-code)
+            (0
+             ;; Success
+             (funcall continuation raw-key raw-value))
+            (liblmdb:+notfound+
+             (values nil nil))
+            (t
+             (unknown-error return-code))))))))
+
+(defun get-with (database key operator)
+  "Get a value from the database."
+  (with-slots (transaction) database
+    (with-val (raw-key key)
+      (with-empty-value (raw-value)
+        (let ((return-code (liblmdb:get (handle transaction)
+                                         (handle database)
+                                         raw-key
+                                         raw-value)))
+          (alexandria:switch (return-code)
+            (0
+             ;; Success
+             (funcall operator raw-key raw-value))
+            (liblmdb:+notfound+
+             (values nil nil))
+            (t
+             (unknown-error return-code))))))))
+
 ;;; Destructors
 
 (defun close-environment (environment)
@@ -534,14 +674,15 @@ gone).))
                        (transaction-environment
                         (database-transaction database)))
                       (handle database))
-  (cffi:foreign-free (%handle database)))
+  (cffi:foreign-free (%handle database))
+  (slot-makunbound database '%handle)
+  t)
 
 (defun close-cursor (cursor)
   "Close a cursor."
-  (with-slots (database) cursor
-    (with-slots (transaction) database
-      (liblmdb:cursor-close (%handle cursor))
-      (cffi:foreign-free (%handle cursor))))
+  (liblmdb:cursor-close (handle cursor))
+  (cffi:foreign-free (%handle cursor))
+  (slot-makunbound cursor '%handle)
   t)
 
 ;;; Macros
@@ -555,13 +696,23 @@ is closed."
           (progn ,@body)
        (close-environment ,env))))
 
+(defun call-with-open-database (op database)
+  (cond ((slot-boundp database '%handle)
+         (funcall op))
+        (t
+         (open-database database)
+         (unwind-protect
+             (funcall op)
+           (close-database database)))))
+
 (defmacro with-database ((database) &body body)
-  "Execute the body and close the database."
-  `(progn
-     (open-database ,database)
-     (unwind-protect
-          (progn ,@body)
-       (close-database ,database))))
+  "Execute the body in a context which ensures that the database is open.
+ If that is already the case, do not change the state.
+ If open was necessary, close the database upon conclusion."
+  (let ((op (gensym "with-database-body-")))
+    `(flet ((,op () ,@body))
+       (declare (dynamic-extent #',op))
+       (call-with-open-database #',op ,database))))
 
 (defmacro with-cursor ((cursor) &body body)
   "Execute the body and close the cursor."
@@ -585,16 +736,40 @@ is closed."
                (setf ,key tk
                      ,value tv))))))))
 
+(defmacro do-pairs-with ((db key value operator) &body body)
+  "Iterate over every key/value pair in the database."
+  (let ((cur (gensym)))
+    `(let ((,cur (make-cursor ,db)))
+       (with-cursor (,cur)
+         (multiple-value-bind (,key ,value)
+             (cursor-get-with ,cur :first ,operator)
+           (loop while ,key do
+             ,@body
+             (multiple-value-bind (tk tv)
+                 (cursor-get-with ,cur :next ,operator)
+               (setf ,key tk
+                     ,value tv))))))))
+
 ;;; Utilities
 
-(defun integer-to-octets (bignum &aux (n-bits (integer-length bignum)))
-  (let* ((n-bytes (ceiling n-bits 8))
+;;; this serves to compute the key length.
+;;; if
+(defun integer-to-octets (bignum)
+  "Return a byte vector padded to standard integer sizes when they fit,
+ that is for 4 and 8 byte words, or variable above that.
+ The standard case is to ensure compatibility with values stored as
+ native word and long integers in other languages, _but_ in little-endian form
+ only."
+  (let* ((n-bits (integer-length bignum))
+         (n-bytes-exact (ceiling n-bits 8))
+         (n-bytes (cond ((> n-bytes-exact 8) n-bytes-exact)
+                        ((> n-bytes-exact 4) 8)
+                        (t 4)))
          (octet-vec (make-array n-bytes :element-type '(unsigned-byte 8))))
     (declare (type (simple-array (unsigned-byte 8)) octet-vec))
     (loop
-       :for i :from (1- n-bytes) :downto 0
-       :for index :from 0
-       :do (setf (aref octet-vec index) (ldb (byte 8 (* i 8)) bignum))
+       :for index  :from (1- n-bytes) :downto 0
+       :do (setf (aref octet-vec index) (ldb (byte 8 (* index 8)) bignum))
        :finally (return octet-vec))))
 
 (defun version-string ()

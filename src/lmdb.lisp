@@ -83,7 +83,12 @@
                   :initarg :max-dbs
                   :initform 1
                   :type integer
-                  :documentation "The maximum number of named databases."))
+                  :documentation "The maximum number of named databases.")
+   (open-flags :reader environment-open-flags
+               :initargs :open-flags
+               :initform 0
+               :type integer
+               :documentation "Passed to env-open"))
   (:documentation "Environment handle."))
 
 (defclass transaction ()
@@ -139,14 +144,16 @@
 ;;; Constructors
 
 (defun make-environment (directory &key (max-databases 1) (mapsize (* 10 1024 1024))
-                                   (class *environment-class*))
+                                   (class *environment-class*)
+                                   (open-flags +mdb-notls+))
   "Create an environment object.
 
 Before an environment can be used, it must be opened with @c(open-environment)."
   (let ((instance (make-instance class
                                  :handle (cffi:foreign-alloc :pointer)
                                  :directory directory
-                                 :max-dbs max-databases)))
+                                 :max-dbs max-databases
+                                 :open-flags open-flags)))
     (unless (= (liblmdb:env-create (%handle instance))
                0)
       (error "Error creating environment object."))
@@ -272,7 +279,7 @@ floats, booleans and strings. Returns a (size . array) pair."
     (ensure-directories-exist directory)
     (let ((return-code (liblmdb:env-open (handle environment)
                                           (namestring directory)
-                                          0
+                                          (environment-open-flags environment)
                                           (cffi:make-pointer +permissions+))))
       (alexandria:switch (return-code)
         (liblmdb:+version-mismatch+
@@ -315,7 +322,7 @@ floats, booleans and strings. Returns a (size . array) pair."
       (list :map-address (cffi:pointer-address (slot liblmdb:me-mapaddr))
             :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))))))
 
-(defun begin-transaction (transaction)
+(defun begin-transaction (transaction &key (flags 0))
   "Begin the transaction.
 
 @begin(deflist)
@@ -329,7 +336,7 @@ floats, booleans and strings. Returns a (size . array) pair."
                                            (if parent
                                                (handle parent)
                                                (cffi:null-pointer))
-                                           0
+                                           flags
                                            (%handle transaction))))
       (alexandria:switch (return-code)
         (0

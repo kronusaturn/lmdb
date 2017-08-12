@@ -73,8 +73,7 @@
 ;;; Classes
 
 (defclass environment ()
-  ((handle :reader %handle
-           :initarg :handle
+  ((handle :accessor %handle
            :documentation "The pointer to the environment handle.")
    (directory :reader environment-directory
               :initarg :directory
@@ -118,7 +117,6 @@
 
 (defclass database ()
   ((handle :accessor %handle
-           :initarg :handle
            :documentation "The DBI handle.
             The initial state is unbound, to be set/cleared by open-/close-
             and tested by with-")
@@ -293,13 +291,13 @@ floats, booleans and strings. Returns a (size . array) pair."
     (ensure-directories-exist directory)
     (let* ((%handle (cffi:foreign-alloc :pointer))
            (return-code (case (liblmdb:env-create %handle)
-                          (0 (liblmdb:env-open %handle
+                          (0 (liblmdb:env-open (cffi:mem-ref %handle :pointer)
                                                (namestring directory)
                                                (environment-open-flags environment)
                                                (cffi:make-pointer +permissions+)))
                           (t
-                           (error "Error creating environment object.")))))
-
+                           (error "Error creating environment object."))))
+           (%environment (cffi:mem-ref %handle :pointer)))
 
       (alexandria:switch (return-code)
         (liblmdb:+version-mismatch+
@@ -315,9 +313,9 @@ floats, booleans and strings. Returns a (size . array) pair."
         (0
          ;; Success: bind the environment and configure it
          (setf (%handle environment) %handle)
-         (liblmdb:env-set-maxdbs %handle (environment-max-dbs environment))
-         (liblmdb:env-set-mapsize %handle (environment-mapsize environment))
-         (liblmdb:env-set-maxreaders %handle (environment-max-readers environment))
+         (liblmdb:env-set-maxdbs %environment (environment-max-dbs environment))
+         (liblmdb:env-set-mapsize %environment (environment-mapsize environment))
+         (liblmdb:env-set-maxreaders %environment (environment-max-readers environment))
          t)
         (t
          (unknown-error return-code)))))

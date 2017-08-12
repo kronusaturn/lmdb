@@ -419,7 +419,7 @@ before another transaction may open it. Multiple concurrent transactions cannot
 open the same database.)
 
 @end(deflist)"
-  (unless (slot-boundp database '%handle)
+  (unless (slot-boundp database 'handle)
     ;; dbi-open claims to be idempotent, but anyway
     (with-slots (transaction name create) database
       (let* ((%handle (cffi:foreign-alloc :pointer))
@@ -452,7 +452,7 @@ open the same database.)
 
 (defun open-cursor (cursor)
   "Open a cursor."
-  (when (slot-boundp cursor '%handle)
+  (when (slot-boundp cursor 'handle)
     (reentrant-cursor-error :cursor cursor))
   (with-slots (database) cursor
     (with-slots (transaction) database
@@ -704,7 +704,7 @@ is closed."
        (close-environment ,env))))
 
 (defun call-with-open-database (op database)
-  (cond ((slot-boundp database '%handle)
+  (cond ((slot-boundp database 'handle)
          (funcall op))
         (t
          (open-database database)

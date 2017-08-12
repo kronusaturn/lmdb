@@ -682,14 +682,14 @@ gone).))
                         (database-transaction database)))
                       (handle database))
   (cffi:foreign-free (%handle database))
-  (slot-makunbound database '%handle)
+  (slot-makunbound database 'handle)
   t)
 
 (defun close-cursor (cursor)
   "Close a cursor."
   (liblmdb:cursor-close (handle cursor))
   (cffi:foreign-free (%handle cursor))
-  (slot-makunbound cursor '%handle)
+  (slot-makunbound cursor 'handle)
   t)
 
 ;;; Macros

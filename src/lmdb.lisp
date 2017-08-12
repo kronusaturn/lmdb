@@ -80,15 +80,26 @@
               :initarg :directory
               :documentation "The directory where environment files are stored.")
    (max-databases :reader environment-max-dbs
-                  :initarg :max-dbs
+                  :initarg :max-dbs :initarg :max-databases
                   :initform 1
                   :type integer
                   :documentation "The maximum number of named databases.")
+   (max-readers :reader environment-max-readers
+                :initarg :max-readers
+                :initform 1
+                :type integer
+                :documentation "The maximum number of threads/reader slots.")
+   (mapsize :reader environment-mapsize
+            :initarg :mapsize
+            :initform (* 1024 1024) ;; rather small
+            :type integer
+            :documentation "The environment mapsize specifie the database size.")
    (open-flags :reader environment-open-flags
-               :initargs :open-flags
-               :initform 0
+               :initarg :open-flags
+               :initform LIBLMDB:+NOTLS+
                :type integer
-               :documentation "Passed to env-open"))
+               :documentation "Passed to env-open.
+               The default value permits multiple threads."))
   (:documentation "Environment handle."))
 
 (defclass transaction ()
@@ -143,25 +154,21 @@
 
 ;;; Constructors
 
-(defun make-environment (directory &key (max-databases 1) (mapsize (* 10 1024 1024))
+(defun make-environment (directory &rest initargs
+                                   &key
                                    (class *environment-class*)
-                                   (open-flags +mdb-notls+))
+                                   &allow-other-keys)
   "Create an environment object.
 
 Before an environment can be used, it must be opened with @c(open-environment)."
-  (let ((instance (make-instance class
-                                 :handle (cffi:foreign-alloc :pointer)
-                                 :directory directory
-                                 :max-dbs max-databases
-                                 :open-flags open-flags)))
-    (unless (= (liblmdb:env-create (%handle instance))
-               0)
-      (error "Error creating environment object."))
-    ;; Set the maximum number of databases
-    (liblmdb:env-set-maxdbs (handle instance) (environment-max-dbs instance))
-    ;; Set memory map size
-    (liblmdb:env-set-mapsize (handle instance) mapsize)
+  (declare (dynamic-extent initargs))
+  (let ((instance (apply #'make-instance class
+                         :directory directory
+                         initargs)))
     instance))
+(defmethod initialize-instance :before ((instance environment) &key class)
+  ;; permit class initiarg
+  class)
 
 (defun make-transaction (environment &key parent (class *transaction-class*))
   "Create a transaction object."
@@ -170,14 +177,21 @@ Before an environment can be used, it must be opened with @c(open-environment)."
                  :environment environment
                  :parent parent))
 
-(defun make-database (transaction name
-                      &key (create t))
+(defparameter *database-class* 'database)
+
+(defun make-database (transaction name &rest initargs
+                      &key (create t) (class *database-class*)
+                      &allow-other-keys)
   "Create a database object.
    The initial state leaves the handle unbound (see open/close)"
-  (make-instance 'database
-                 :transaction transaction
-                 :name name
-                 :create create))
+  (apply #'make-instance class
+         :transaction transaction
+         :name name
+         :create create
+         initargs))
+(defmethod initialize-instance :before ((instance database) &key class)
+  ;; permit the class initarg
+  class)
 
 (defun convert-data (data)
   "Convert Lisp data to a format LMDB likes. Supported types are integers,
@@ -277,10 +291,16 @@ floats, booleans and strings. Returns a (size . array) pair."
   (with-slots (directory) environment
     (assert (uiop:directory-pathname-p directory))
     (ensure-directories-exist directory)
-    (let ((return-code (liblmdb:env-open (handle environment)
-                                          (namestring directory)
-                                          (environment-open-flags environment)
-                                          (cffi:make-pointer +permissions+))))
+    (let* ((%handle (cffi:foreign-alloc :pointer))
+           (return-code (case (liblmdb:env-create %handle)
+                          (0 (liblmdb:env-open %handle
+                                               (namestring directory)
+                                               (environment-open-flags environment)
+                                               (cffi:make-pointer +permissions+)))
+                          (t
+                           (error "Error creating environment object.")))))
+
+
       (alexandria:switch (return-code)
         (liblmdb:+version-mismatch+
          (error "Version mismatch: the client version is different from the environment version."))
@@ -293,8 +313,12 @@ floats, booleans and strings. Returns a (size . array) pair."
         (+eagain+
          (error "The environment files are locked by another process."))
         (0
-         ;; Success
-         )
+         ;; Success: bind the environment and configure it
+         (setf (%handle environment) %handle)
+         (liblmdb:env-set-maxdbs %handle (environment-max-dbs environment))
+         (liblmdb:env-set-mapsize %handle (environment-mapsize environment))
+         (liblmdb:env-set-maxreaders %handle (environment-max-readers environment))
+         t)
         (t
          (unknown-error return-code)))))
   environment)
@@ -433,7 +457,7 @@ open the same database.)
         (alexandria:switch (return-code)
           (0
            ;; Success
-           t)
+           (setf (%handle database) %handle))
           (liblmdb:+notfound+
            (error 'database-not-found :name name :environment (transaction-environment transaction)))
           (liblmdb:+dbs-full+
@@ -657,7 +681,10 @@ in a segmentation fault.)
 
 @end(deflist)"
   (liblmdb:env-close (handle environment))
-  (cffi:foreign-free (%handle environment)))
+  (cffi:foreign-free (%handle environment))
+  ;; given the situation, above, best make it unusable
+  (slot-makunbound environment 'handle)
+  t)
 
 (defun close-database (database)
   "Close the database.

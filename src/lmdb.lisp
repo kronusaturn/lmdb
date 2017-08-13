@@ -734,7 +734,7 @@ gone).))
     (release-handle database)
     (setf (transaction-databases transaction)
           (remove database (transaction-databases transaction)))
-    t)
+    t))
 
 (defun close-cursor (cursor)
   "Close a cursor."

@@ -112,7 +112,15 @@
    (parent :reader transaction-parent
            :initarg :parent
            :type (or transaction null)
-           :documentation "The parent transaction, if any."))
+           :documentation "The parent transaction, if any.")
+   (databases
+    :accessor transaction-databases
+    :initform nil
+    :type list
+    :documentation "Record all databases open within the transaction.
+    LMDB enforces that database remain open within the extent of
+    a transaction only. In order to records this state, abort/commit/reset
+    operations use this list to release the native database index."))    
   (:documentation "A transaction."))
 
 (defclass database ()
@@ -277,6 +285,12 @@ floats, booleans and strings. Returns a (size . array) pair."
   "Return the handle from an environment, transaction or database."
   (cffi:mem-ref (%handle object) :pointer))
 
+(defun release-handle (object)
+  (when (slot-boundp object 'handle)
+    (cffi:foreign-free (%handle object))
+    (slot-makunbound object 'handle)))
+
+
 (defun open-environment (environment)
   "Open the environment connection.
 
@@ -289,36 +303,36 @@ floats, booleans and strings. Returns a (size . array) pair."
   (with-slots (directory) environment
     (assert (uiop:directory-pathname-p directory))
     (ensure-directories-exist directory)
-    (let* ((%handle (cffi:foreign-alloc :pointer))
-           (return-code (case (liblmdb:env-create %handle)
-                          (0 (liblmdb:env-open (cffi:mem-ref %handle :pointer)
-                                               (namestring directory)
-                                               (environment-open-flags environment)
-                                               (cffi:make-pointer +permissions+)))
-                          (t
-                           (error "Error creating environment object."))))
-           (%environment (cffi:mem-ref %handle :pointer)))
-
-      (alexandria:switch (return-code)
-        (liblmdb:+version-mismatch+
-         (error "Version mismatch: the client version is different from the environment version."))
-        (liblmdb:+invalid+
-         (error "Data corruption: the environment header files are corrupted."))
-        (+enoent+
-         (error "The environment directory doesn't exist."))
-        (+eacces+
-         (error "The user doesn't have permission to use the environment directory."))
-        (+eagain+
-         (error "The environment files are locked by another process."))
-        (0
-         ;; Success: bind the environment and configure it
-         (setf (%handle environment) %handle)
-         (liblmdb:env-set-maxdbs %environment (environment-max-dbs environment))
-         (liblmdb:env-set-mapsize %environment (environment-mapsize environment))
-         (liblmdb:env-set-maxreaders %environment (environment-max-readers environment))
-         t)
+    (let* ((%handle (cffi:foreign-alloc :pointer)))
+      (case (liblmdb:env-create %handle)
+        (0 (let ((%environment (cffi:mem-ref %handle :pointer)))
+             (liblmdb:env-set-maxdbs %environment (environment-max-dbs environment))
+             (liblmdb:env-set-mapsize %environment (environment-mapsize environment))
+             (liblmdb:env-set-maxreaders %environment (environment-max-readers environment))
+             (let ((return-code
+                    (liblmdb:env-open %environment
+                                      (namestring directory)
+                                      (environment-open-flags environment)
+                                      (cffi:make-pointer +permissions+))))
+               (alexandria:switch (return-code)
+                                  (liblmdb:+version-mismatch+
+                                   (error "Version mismatch: the client version is different from the environment version."))
+                                  (liblmdb:+invalid+
+                                   (error "Data corruption: the environment header files are corrupted."))
+                                  (+enoent+
+                                   (error "The environment directory doesn't exist."))
+                                  (+eacces+
+                                   (error "The user doesn't have permission to use the environment directory."))
+                                  (+eagain+
+                                   (error "The environment files are locked by another process."))
+                                  (0
+                                   ;; Success: bind the environment and configure it
+                                   (setf (%handle environment) %handle)
+                                   t)
+                                  (t
+                                   (unknown-error return-code))))))
         (t
-         (unknown-error return-code)))))
+         (error "Error creating environment object.")))))
   environment)
 
 (defun environment-statistics (environment)
@@ -368,6 +382,11 @@ floats, booleans and strings. Returns a (size . array) pair."
         (t
          (unknown-error return-code))))))
 
+(defun release-transaction-databases (transaction)
+  ;; ensure database state reflects its closure at the transaction conclusion
+  (loop for database in (transaction-databases transaction)
+    do (release-handle database)))
+
 (defun commit-transaction (transaction)
   "Commit the transaction. The transaction pointer is freed.
 
@@ -382,6 +401,7 @@ called by the transaction-creating thread.)
     (alexandria:switch (return-code :test #'=)
       (0
        ;; Success
+       (release-transaction-databases transaction)
        t)
       (t
        (unknown-error return-code)))))
@@ -396,7 +416,8 @@ called by the transaction-creating thread.)
 called by the transaction-creating thread.)
 
 @end(deflist)"
-  (liblmdb:txn-abort (handle transaction)))
+  (liblmdb:txn-abort (handle transaction))
+  (release-transaction-databases transaction))
 
 (defun renew-transaction (transaction)
   "Renew the transaction.
@@ -408,7 +429,7 @@ called by the transaction-creating thread.)
 
 @end(deflist)"
   (with-slots (env parent) transaction
-    (let ((return-code (liblmdb:txn-renew (%handle transaction))))
+    (let ((return-code (liblmdb:txn-renew (handle transaction))))
       (alexandria:switch (return-code)
         (0
          ;; Success
@@ -426,7 +447,8 @@ called by the transaction-creating thread.)
 @def(A transaction may only be used by a single thread.)
 
 @end(deflist)"
-  (liblmdb:txn-reset (%handle transaction)))
+  (liblmdb:txn-reset (handle transaction))
+  (release-transaction-databases transaction))
 
 
 
@@ -441,9 +463,11 @@ before another transaction may open it. Multiple concurrent transactions cannot
 open the same database.)
 
 @end(deflist)"
-  (unless (slot-boundp database 'handle)
-    ;; dbi-open claims to be idempotent, but anyway
-    (with-slots (transaction name create) database
+  (with-slots (transaction name create) database
+    (when (find database (transaction-databases transaction))
+      (error "Reentrant open-database: ~s ~s." database transaction))
+    (unless (slot-boundp database 'handle)
+      ;; dbi-open claims to be idempotent, but anyway
       (let* ((%handle (cffi:foreign-alloc :pointer))
              (return-code (liblmdb:dbi-open (handle transaction)
                                             name
@@ -455,6 +479,7 @@ open the same database.)
         (alexandria:switch (return-code)
           (0
            ;; Success
+           (push database (transaction-databases transaction))
            (setf (%handle database) %handle))
           (liblmdb:+notfound+
            (error 'database-not-found :name name :environment (transaction-environment transaction)))
@@ -462,7 +487,8 @@ open the same database.)
            (error 'database-maximum-count :name name :environment (transaction-environment transaction)))
           (t
            (unknown-error return-code))))))
-  database)
+  (values database
+          (handle database)))
 
 (defmethod print-object ((object database) stream)
   (let ((*print-pretty* nil))
@@ -702,13 +728,13 @@ database corruption to errors like MDB_BAD_VALSIZE (since the DB name is
 gone).))
 
 @end(deflist)"
-  (liblmdb:dbi-close (handle
-                       (transaction-environment
-                        (database-transaction database)))
-                      (handle database))
-  (cffi:foreign-free (%handle database))
-  (slot-makunbound database 'handle)
-  t)
+  (with-slots (transaction name create) database
+    (liblmdb:dbi-close (handle (transaction-environment transaction))
+                       (handle database))
+    (release-handle database)
+    (setf (transaction-databases transaction)
+          (remove database (transaction-databases transaction)))
+    t)
 
 (defun close-cursor (cursor)
   "Close a cursor."

@@ -3,8 +3,10 @@
   (:use :cl)
   (:shadow :get)
   (:export
+   :*database-class*
    :*environment-class*
    :*transaction-class*
+   :*transaction*
    :abort-transaction
    :begin-transaction
    :close-cursor
@@ -32,6 +34,7 @@
    :open-cursor
    :open-database
    :open-environment
+   :open-p
    :put
    :reentrant-cursor-error
    :renew-transaction
@@ -42,7 +45,8 @@
    :version-string
    :with-cursor
    :with-database
-   :with-environment)
+   :with-environment
+   :with-transaction)
   (:documentation "The high-level LMDB interface."))
 
 (in-package :lmdb)
@@ -59,6 +63,7 @@
 
 ;;; Constants
 
+(defparameter *database-class* 'database)
 (defparameter *environment-class* 'environment)
 (defparameter *transaction-class* 'transaction)
 
@@ -69,6 +74,11 @@
 (defparameter +enoent+ 2)
 (defparameter +eacces+ 13)
 (defparameter +eagain+ 11)
+
+(defparameter *transactions* ()
+  "Binds a list of all active transactions for reference in call-with-transaction")
+(defparameter *transaction* nil
+  "Binds the innermost active transaction")
 
 ;;; Classes
 
@@ -183,8 +193,6 @@ Before an environment can be used, it must be opened with @c(open-environment)."
                  :environment environment
                  :parent parent))
 
-(defparameter *database-class* 'database)
-
 (defun make-database (transaction name &rest initargs
                       &key (create t) (class *database-class*)
                       &allow-other-keys)
@@ -290,6 +298,12 @@ floats, booleans and strings. Returns a (size . array) pair."
     (cffi:foreign-free (%handle object))
     (slot-makunbound object 'handle)))
 
+(defgeneric open-p (object)
+  (:method ((object t))
+    (and (slot-boundp object 'handle)
+         (not (cffi:null-pointer-p (cffi:mem-ref (%handle object) :pointer))))))
+
+
 
 (defun open-environment (environment)
   "Open the environment connection.
@@ -358,6 +372,23 @@ floats, booleans and strings. Returns a (size . array) pair."
       (list :map-address (cffi:pointer-address (slot liblmdb:me-mapaddr))
             :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))))))
 
+
+;;; transaction management
+
+(defgeneric enter-transaction (transaction disposition &key flags)
+  (:method ((transaction lmdb:transaction) (disposition (eql :begin)) &rest args)
+    (apply #'lmdb:begin-transaction transaction args))
+  (:method ((transaction lmdb:transaction) (disposition (eql :renew)) &rest args)
+    (declare (ignore args))
+    (lmdb:renew-transaction transaction)))
+
+(defgeneric leave-transaction (transaction disposition)
+  (:method ((transaction lmdb:transaction) (disposition (eql :abort)))
+    (lmdb:abort-transaction transaction))
+  (:method ((transaction lmdb:transaction) (disposition (eql :commit)))
+    (lmdb:commit-transaction transaction))
+  (:method ((transaction lmdb:transaction) (disposition (eql :reset)))
+    (lmdb:reset-transaction transaction)))
 (defun begin-transaction (transaction &key (flags 0))
   "Begin the transaction.
 
@@ -401,6 +432,7 @@ called by the transaction-creating thread.)
     (alexandria:switch (return-code :test #'=)
       (0
        ;; Success
+       (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer))
        (release-transaction-databases transaction)
        t)
       (t
@@ -417,6 +449,7 @@ called by the transaction-creating thread.)
 
 @end(deflist)"
   (liblmdb:txn-abort (handle transaction))
+  (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer))
   (release-transaction-databases transaction))
 
 (defun renew-transaction (transaction)
@@ -465,7 +498,9 @@ open the same database.)
 @end(deflist)"
   (with-slots (transaction name create) database
     (when (find database (transaction-databases transaction))
-      (error "Reentrant open-database: ~s ~s." database transaction))
+      (error "open-database: reentrant invocation: ~s ~s." database transaction))
+    (unless (open-p transaction)
+      (error "open-database: transaction not active: ~s ~s." database transaction))
     (unless (slot-boundp database 'handle)
       ;; dbi-open claims to be idempotent, but anyway
       (let* ((%handle (cffi:foreign-alloc :pointer))
@@ -753,6 +788,47 @@ is closed."
      (unwind-protect
           (progn ,@body)
        (close-environment ,env))))
+
+(defun call-with-transaction (op transaction
+                                 &key
+                                 (normal-disposition :reset)
+                                 (error-disposition :abort)
+                                 (initial-disposition :begin)
+                                 (flags () fs-p))
+  "If the transaction is already established, just call the operator.
+ Otherwise, wrap that call with bindings for the current and nested
+ transaction, instantiate the transaction and track completion when
+ closing it."
+  (declare (dynamic-extent op))
+  (cond ((find transaction *transactions*)
+         (funcall op transaction))
+        (t
+         (let ((status nil)
+               (*transactions* (cons transaction *transactions*))
+               (*transaction* transaction)
+               (flags-args (when fs-p `(:flags ,flags))))
+           (apply #'enter-transaction transaction initial-disposition flags-args)
+           (unwind-protect (multiple-value-prog1 (funcall op transaction)
+                             (leave-transaction transaction normal-disposition)
+                             (setf status normal-disposition))
+             (unless status
+               (leave-transaction transaction error-disposition)))))))
+
+(defmacro with-transaction ((transaction &rest options
+                                         &key normal-disposition
+                                         error-disposition
+                                         initial-disposition
+                                         flags)
+                            &body body)
+  (declare (ignore normal-disposition error-disposition initial-disposition flags))
+  (let ((op (gensym))
+        (transaction-variable (if (consp transaction) (first transaction) transaction))
+        (transaction-form (if (consp transaction) (second transaction) transaction)))
+    `(flet ((,op (,transaction-variable)
+              (declare (ignorable ,transaction-variable))
+              ,@body))
+       (declare (dynamic-extent #',op))
+       (call-with-transaction #',op ,transaction-form ,@options))))
 
 (defun call-with-open-database (op database)
   (cond ((slot-boundp database 'handle)

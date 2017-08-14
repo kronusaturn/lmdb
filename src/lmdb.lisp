@@ -375,20 +375,6 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 ;;; transaction management
 
-(defgeneric enter-transaction (transaction disposition &key flags)
-  (:method ((transaction lmdb:transaction) (disposition (eql :begin)) &rest args)
-    (apply #'lmdb:begin-transaction transaction args))
-  (:method ((transaction lmdb:transaction) (disposition (eql :renew)) &rest args)
-    (declare (ignore args))
-    (lmdb:renew-transaction transaction)))
-
-(defgeneric leave-transaction (transaction disposition)
-  (:method ((transaction lmdb:transaction) (disposition (eql :abort)))
-    (lmdb:abort-transaction transaction))
-  (:method ((transaction lmdb:transaction) (disposition (eql :commit)))
-    (lmdb:commit-transaction transaction))
-  (:method ((transaction lmdb:transaction) (disposition (eql :reset)))
-    (lmdb:reset-transaction transaction)))
 (defun begin-transaction (transaction &key (flags 0))
   "Begin the transaction.
 
@@ -483,7 +469,23 @@ called by the transaction-creating thread.)
   (liblmdb:txn-reset (handle transaction))
   (release-transaction-databases transaction))
 
+(defgeneric enter-transaction (transaction disposition &key flags)
+  (:method ((transaction lmdb:transaction) (disposition (eql :begin)) &rest args)
+    (apply #'begin-transaction transaction args))
+  (:method ((transaction lmdb:transaction) (disposition (eql :renew)) &rest args)
+    (declare (ignore args))
+    (renew-transaction transaction)))
 
+(defgeneric leave-transaction (transaction disposition)
+  (:method ((transaction transaction) (disposition (eql :abort)))
+    (abort-transaction transaction))
+  (:method ((transaction transaction) (disposition (eql :commit)))
+    (commit-transaction transaction))
+  (:method ((transaction transaction) (disposition (eql :reset)))
+    (reset-transaction transaction)))
+
+
+;;; database management
 
 (defun open-database (database)
   "Open a database.
@@ -777,6 +779,7 @@ gone).))
   (cffi:foreign-free (%handle cursor))
   (slot-makunbound cursor 'handle)
   t)
+
 
 ;;; Macros
 

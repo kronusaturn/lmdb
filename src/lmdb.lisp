@@ -402,7 +402,8 @@ floats, booleans and strings. Returns a (size . array) pair."
 (defun release-transaction-databases (transaction)
   ;; ensure database state reflects its closure at the transaction conclusion
   (loop for database in (transaction-databases transaction)
-    do (release-handle database)))
+    do (release-handle database))
+  (setf (transaction-databases transaction) nil))
 
 (defun commit-transaction (transaction)
   "Commit the transaction. The transaction pointer is freed.
@@ -487,8 +488,8 @@ called by the transaction-creating thread.)
 
 ;;; database management
 
-(defun open-database (database)
-  "Open a database.
+(defgeneric open-database (database)
+  (:documentation "Open a database.
 Bind the dbi handle and call dbi-open to set it.
 @begin(deflist)
 @term(Thread Safety)
@@ -497,7 +498,8 @@ Bind the dbi handle and call dbi-open to set it.
 before another transaction may open it. Multiple concurrent transactions cannot
 open the same database.)
 
-@end(deflist)"
+@end(deflist)")
+  (:method ((database database))
   (with-slots (transaction name create) database
     (when (find database (transaction-databases transaction))
       (error "open-database: reentrant invocation: ~s ~s." database transaction))
@@ -525,7 +527,7 @@ open the same database.)
           (t
            (unknown-error return-code))))))
   (values database
-          (handle database)))
+          (handle database))))
 
 (defmethod print-object ((object database) stream)
   (let ((*print-pretty* nil))
@@ -834,6 +836,7 @@ is closed."
        (call-with-transaction #',op ,transaction-form ,@options))))
 
 (defun call-with-open-database (op database)
+  (declare (dynamic-extent op))
   (cond ((slot-boundp database 'handle)
          (funcall op))
         (t

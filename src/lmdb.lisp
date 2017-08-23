@@ -358,7 +358,13 @@ floats, booleans and strings. Returns a (size . array) pair."
                  `(cffi:foreign-slot-value stat
                                            '(:struct liblmdb:stat)
                                            ',slot)))
-      (list :page-size (slot liblmdb:ms-psize)))))
+      (list :page-size (slot liblmdb:ms-psize)
+            :depth (slot liblmdb:ms-depth)
+            :branch-pages (slot liblmdb:ms-branch-pages)
+            :leaf-pages (slot liblmdb:ms-leaf-pages)
+            :overflow-pages (slot liblmdb:ms-overflow-pages)
+            :entries (slot liblmdb:ms-entries)
+            ))))
 
 (defun environment-info (environment)
   "Return information about the environment."
@@ -370,8 +376,11 @@ floats, booleans and strings. Returns a (size . array) pair."
                                            '(:struct liblmdb:envinfo)
                                            ',slot)))
       (list :map-address (cffi:pointer-address (slot liblmdb:me-mapaddr))
-            :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))))))
-
+            :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))
+            :last-page-number (cffi:pointer-address (slot liblmdb:me-last-pageno))
+            :last-transaction-id (cffi:pointer-address (slot liblmdb:me-last-txnid))
+            :maximum-readers (cffi:pointer-address (slot liblmdb:me-maxreaders))
+            :number-of-readers (cffi:pointer-address (slot liblmdb:me-numreaders))))))
 
 ;;; transaction management
 

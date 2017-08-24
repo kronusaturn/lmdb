@@ -401,12 +401,12 @@ floats, booleans and strings. Returns a (size . array) pair."
                  `(cffi:foreign-slot-value info
                                            '(:struct liblmdb:envinfo)
                                            ',slot)))
-      (list :map-address (cffi:pointer-address (slot liblmdb:me-mapaddr))
-            :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))
-            :last-page-number (cffi:pointer-address (slot liblmdb:me-last-pgno))
-            :last-transaction-id (cffi:pointer-address (slot liblmdb:me-last-txnid))
-            :maximum-readers (cffi:pointer-address (slot liblmdb:me-maxreaders))
-            :number-of-readers (cffi:pointer-address (slot liblmdb:me-numreaders))))))
+      (list :map-address (slot liblmdb:me-mapaddr)
+            :map-size (slot liblmdb:me-mapsize)
+            :last-page-number (slot liblmdb:me-last-pgno)
+            :last-transaction-id (slot liblmdb:me-last-txnid)
+            :maximum-readers (slot liblmdb:me-maxreaders)
+            :number-of-readers (slot liblmdb:me-numreaders)))))
 
 
 ;;; transaction management

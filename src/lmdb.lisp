@@ -407,7 +407,10 @@ floats, booleans and strings. Returns a (size . array) pair."
             :last-transaction-id (cffi:pointer-address (slot liblmdb:me-last-txnid))
             :maximum-readers (cffi:pointer-address (slot liblmdb:me-maxreaders))
             :number-of-readers (cffi:pointer-address (slot liblmdb:me-numreaders))))))
+<<<<<<< HEAD
 
+=======
+>>>>>>> 46d76a5044a7045671088c4940603fabf03ec648
 
 ;;; transaction management
 

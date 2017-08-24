@@ -22,6 +22,9 @@
    :database-not-found
    :del
    :do-pairs
+   :drop-database
+   :ensure-open-database
+   :ensure-open-environment
    :environment
    :environment-info
    :environment-statistics
@@ -84,7 +87,9 @@
 
 (defclass environment ()
   ((handle :accessor %handle
-           :documentation "The pointer to the environment handle.")
+           :documentation "The handle on the environment poiner.
+    As it is used as the pointer only, it could be bound as such, but the
+    handle enables conditional finalization. (see finalize-environment)")
    (directory :reader environment-directory
               :initarg :directory
               :documentation "The directory where environment files are stored.")
@@ -114,7 +119,7 @@
 (defclass transaction ()
   ((handle :reader %handle
            :initarg :handle
-           :documentation "The pointer to the transaction.")
+           :documentation "The handle on the transaction pointer.")
    (env :reader transaction-environment
         :initarg :environment
         :type environment
@@ -134,14 +139,18 @@
   (:documentation "A transaction."))
 
 (defclass database ()
-  ((handle :accessor %handle
-           :documentation "The DBI handle.
-            The initial state is unbound, to be set/cleared by open-/close-
-            and tested by with-")
-   (transaction :reader database-transaction
-                :initarg :transaction
-                :type transaction
-                :documentation "The transaction this database belongs to.")
+  ((handle
+    :accessor %handle
+    :documentation "The DBI handle.
+    The initial state is unbound, to be set/cleared by open-/close-
+    and tested by with-")
+   (transaction
+    :reader database-transaction
+    :initarg :transaction
+    :type transaction
+    :documentation "The transaction this database was opened in.
+    Where this initial transaction commits, the database remains open
+    and may be used in a subsequent transaction.")
    (name :reader database-name
          :initarg :name
          :type string
@@ -184,14 +193,25 @@ Before an environment can be used, it must be opened with @c(open-environment)."
     instance))
 (defmethod initialize-instance :before ((instance environment) &key class)
   ;; permit class initiarg
-  class)
+  (declare (ignore class)))
 
-(defun make-transaction (environment &key parent (class *transaction-class*))
+(defun make-transaction (environment &rest args
+                                     &key (class *transaction-class*)
+                                     parent
+                                     &allow-other-keys)
   "Create a transaction object."
-  (make-instance class
-                 :handle (cffi:foreign-alloc :pointer)
-                 :environment environment
-                 :parent parent))
+  (declare (dynamic-extent args)
+           (ignore parent))
+  ;; incline failed to compile
+  (let ((%handle (cffi:foreign-alloc :pointer)))
+    (apply #'make-instance class
+           :handle %handle
+           :environment environment
+           args)))
+
+(defmethod initialize-instance :before ((instance transaction) &key class)
+  ;; permit class initiarg
+  (declare (ignore class)))
 
 (defun make-database (transaction name &rest initargs
                       &key (create t) (class *database-class*)
@@ -289,9 +309,12 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 ;;; Viscera
 
-(defun handle (object)
-  "Return the handle from an environment, transaction or database."
-  (cffi:mem-ref (%handle object) :pointer))
+(defgeneric handle (object)
+  (:documentation "Return the handle from an environment, transaction or database.")
+  (:method ((object t))
+    (cffi:mem-ref (%handle object) :pointer))
+  (:method ((object database))
+    (cffi:mem-ref (%handle object) :uint)))
 
 (defun release-handle (object)
   (when (slot-boundp object 'handle)
@@ -342,6 +365,9 @@ floats, booleans and strings. Returns a (size . array) pair."
                                   (0
                                    ;; Success: bind the environment and configure it
                                    (setf (%handle environment) %handle)
+                                   #+sbcl
+                                   (sb-ext:finalize environment
+                                                    #'(lambda () (finalize-environment %handle)))
                                    t)
                                   (t
                                    (unknown-error return-code))))))
@@ -358,7 +384,13 @@ floats, booleans and strings. Returns a (size . array) pair."
                  `(cffi:foreign-slot-value stat
                                            '(:struct liblmdb:stat)
                                            ',slot)))
-      (list :page-size (slot liblmdb:ms-psize)))))
+      (list :page-size (slot liblmdb:ms-psize)
+            :depth (slot liblmdb:ms-depth)
+            :branch-pages (slot liblmdb:ms-branch-pages)
+            :leaf-pages (slot liblmdb:ms-leaf-pages)
+            :overflow-pages (slot liblmdb:ms-overflow-pages)
+            :entries (slot liblmdb:ms-entries)
+            ))))
 
 (defun environment-info (environment)
   "Return information about the environment."
@@ -370,7 +402,11 @@ floats, booleans and strings. Returns a (size . array) pair."
                                            '(:struct liblmdb:envinfo)
                                            ',slot)))
       (list :map-address (cffi:pointer-address (slot liblmdb:me-mapaddr))
-            :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))))))
+            :map-size (cffi:pointer-address (slot liblmdb:me-mapsize))
+            :last-page-number (cffi:pointer-address (slot liblmdb:me-last-pageno))
+            :last-transaction-id (cffi:pointer-address (slot liblmdb:me-last-txnid))
+            :maximum-readers (cffi:pointer-address (slot liblmdb:me-maxreaders))
+            :number-of-readers (cffi:pointer-address (slot liblmdb:me-numreaders))))))
 
 
 ;;; transaction management
@@ -401,6 +437,7 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 (defun release-transaction-databases (transaction)
   ;; ensure database state reflects its closure at the transaction conclusion
+  #+(or)
   (loop for database in (transaction-databases transaction)
     do (release-handle database))
   (setf (transaction-databases transaction) nil))
@@ -507,7 +544,7 @@ open the same database.)
       (error "open-database: transaction not active: ~s ~s." database transaction))
     (unless (slot-boundp database 'handle)
       ;; dbi-open claims to be idempotent, but anyway
-      (let* ((%handle (cffi:foreign-alloc :pointer))
+      (let* ((%handle (cffi:foreign-alloc :uint))
              (return-code (liblmdb:dbi-open (handle transaction)
                                             name
                                             (logior 0
@@ -536,6 +573,11 @@ open the same database.)
                               (slot-value object 'name)
                               "?")))))
 
+
+(defgeneric drop-database ((database database) &key (delete 0))
+   (liblmdb:drop (handle transaction) (handle graph-db) delete))
+
+;;; cursor operations
 
 (defun open-cursor (cursor)
   "Open a cursor."
@@ -731,6 +773,17 @@ The @cl:param(operation) argument specifies the operation."
 
 ;;; Destructors
 
+(defun finalize-environment (%handle)
+  "When an environment instance is no longer reachable, examine its
+ lmdb environment handle. Iff that is still open, close it.
+ Finally, free the handle"
+  (let ((%env (cffi:mem-ref %handle :pointer)))
+    (unless (cffi:null-pointer-p %env)
+      (liblmdb:env-close %env)
+      ;; to be sure
+      (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer)))
+    (cffi:foreign-free %handle)))
+
 (defun close-environment (environment)
   "Close the environment connection and free the memory.
 
@@ -743,10 +796,15 @@ function. Attempts to use those objects are closing the environment will result
 in a segmentation fault.)
 
 @end(deflist)"
-  (liblmdb:env-close (handle environment))
-  (cffi:foreign-free (%handle environment))
-  ;; given the situation, above, best make it unusable
-  (slot-makunbound environment 'handle)
+  (when (slot-boundp environment 'handle)
+    ;; similar to finalize, but do not free the handle.
+    (let ((%env (handle environment)))
+      (unless (cffi:null-pointer-p %env)
+        (liblmdb:env-close %env)
+        (setf (cffi:mem-ref (%handle environment) :pointer) (cffi:null-pointer))))
+    ;;!! this eliminates the reference, but leaves the handle allocated to be
+    ;; available to the finalize-environment operator
+    (slot-makunbound environment 'handle))
   t)
 
 (defun close-database (database)
@@ -785,14 +843,40 @@ gone).))
 
 ;;; Macros
 
-(defmacro with-environment ((env) &body body)
-  "Open the @cl:param(env), execute @cl:param(body) and ensure the environment
-is closed."
-  `(progn
-     (open-environment ,env)
-     (unwind-protect
-          (progn ,@body)
-       (close-environment ,env))))
+(defun call-with-open-environment (op environment)
+  (declare (dynamic-extent op))
+  (cond ((slot-boundp environment 'handle)
+         (funcall op))
+        (t
+         (open-environment environment)
+         (unwind-protect
+             (funcall op)
+           (close-environment environment)))))
+
+(defmacro with-environment ((environment) &body body)
+  "Execute the @cl:param(body) in a context which ensures that the @cl:param(environment) is open.
+ If that is already the case, do not change the state.
+ If open was necessary, close the environment upon conclusion."
+  (let ((op (gensym "with-environment-body-")))
+    `(flet ((,op () ,@body))
+       (declare (dynamic-extent #',op))
+       (call-with-open-environment #',op ,environment))))
+
+(defun call-ensuring-open-environment (op environment)
+  (declare (dynamic-extent op))
+  (unless (slot-boundp environment 'handle)
+    (open-environment environment))
+  (funcall op))
+
+(defmacro ensure-open-environment ((environment) &body body)
+  "Execute the @cl:param(body) in a context which ensures that the @cl:param(environment) is open.
+ If that is already the case, do not change the state.
+ In any case, leave the environment open upon conclusion"
+  (let ((op (gensym "ensure-environment-body-")))
+    `(flet ((,op () ,@body))
+       (declare (dynamic-extent #',op))
+       (call-ensuring-open-environment #',op ,environment))))
+
 
 (defun call-with-transaction (op transaction
                                  &key
@@ -828,7 +912,11 @@ is closed."
   (declare (ignore normal-disposition error-disposition initial-disposition flags))
   (let ((op (gensym))
         (transaction-variable (if (consp transaction) (first transaction) transaction))
-        (transaction-form (if (consp transaction) (second transaction) transaction)))
+        (transaction-form (if (consp transaction)
+                              (if (consp (second transaction))
+                                  (second transaction)
+                                  `(make-transaction ,@(rest transaction)))
+                              transaction)))
     `(flet ((,op (,transaction-variable)
               (declare (ignorable ,transaction-variable))
               ,@body))
@@ -853,6 +941,11 @@ is closed."
     `(flet ((,op () ,@body))
        (declare (dynamic-extent #',op))
        (call-with-open-database #',op ,database))))
+
+(defun ensure-open-database (database)
+  (unless (slot-boundp database 'handle)
+    (open-database database))
+  database)
 
 (defmacro with-cursor ((cursor) &body body)
   "Execute the body and close the cursor."

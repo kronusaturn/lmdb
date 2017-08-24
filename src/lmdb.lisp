@@ -574,8 +574,9 @@ open the same database.)
                               "?")))))
 
 
-(defgeneric drop-database ((database database) &key (delete 0))
-   (liblmdb:drop (handle transaction) (handle graph-db) delete))
+(defgeneric drop-database  (database &key drop)
+  (:method ((database database) &key (delete 0))
+    (liblmdb:drop (handle transaction) (handle graph-db) delete)))
 
 ;;; cursor operations
 

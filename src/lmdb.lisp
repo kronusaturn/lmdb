@@ -152,13 +152,6 @@
     :documentation "The DBI handle.
     The initial state is unbound, to be set/cleared by open-/close-
     and tested by with-")
-   (transaction
-    :reader database-transaction
-    :initarg :transaction
-    :type transaction
-    :documentation "The transaction this database was opened in.
-    Where this initial transaction commits, the database remains open
-    and may be used in a subsequent transaction.")
    (name :reader database-name
          :initarg :name
          :type string
@@ -168,7 +161,11 @@
            :type boolean
            :documentation "Whether or not to create the database if it doesn't
            exist."))
-  (:documentation "A database."))
+  (:documentation "A database.
+   The recommended practice is to open a database in a process once, in an
+   initial read-only transaction, which commits. this leave the db open for
+   use with later transactions.
+   All the dynamic value of *transaction* governs all database operations."))
 
 (defstruct (value (:constructor %make-value))
   "A value is a generic representation of keys and values."
@@ -189,9 +186,7 @@
     :reader cursor-transaction
     :initarg :transaction
     :type transaction
-    :documentation "Th transaction which governs the cursor.
-    By default, that of the database, but for databases with indefinite
-    extent, it may be a later transaction.") )
+    :documentation "Th transaction which governs the cursor.") )
   (:documentation "A cursor."))
 
 ;;; Constructors
@@ -232,13 +227,12 @@ Before an environment can be used, it must be opened with @c(open-environment)."
   ;; permit class initiarg
   (declare (ignore class)))
 
-(defun make-database (transaction name &rest initargs
+(defun make-database (name &rest initargs
                       &key (create t) (class *database-class*)
                       &allow-other-keys)
   "Create a database object.
    The initial state leaves the handle unbound (see open/close)"
   (apply #'make-instance class
-         :transaction transaction
          :name name
          :create create
          initargs))
@@ -272,7 +266,7 @@ floats, booleans and strings. Returns a (size . array) pair."
     (%make-value :size size
                  :data vector)))
 
-(defun make-cursor (database &key (transaction (database-transaction database)))
+(defun make-cursor (database &key (transaction *transaction*))
   "Create a cursor object.
    The initial state leaves the handle unbound."
   (make-instance 'cursor
@@ -281,7 +275,7 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 (defmethod initialize-instance ((instance cursor) &rest args
                                 &key (database (error "cursor: database is required"))
-                                (transaction (database-transaction database)))
+                                (transaction *transaction*))
   (declare (dynamic-extent args))
   (apply #'call-next-method instance
          :transaction transaction
@@ -350,6 +344,8 @@ floats, booleans and strings. Returns a (size . array) pair."
     (slot-makunbound object 'handle)))
 
 (defgeneric open-p (object)
+  (:method ((object null))
+    nil)
   (:method ((object t))
     (and (slot-boundp object 'handle)
          (not (cffi:null-pointer-p (cffi:mem-ref (%handle object) :pointer))))))
@@ -536,8 +532,7 @@ called by the transaction-creating thread.)
   (release-transaction-databases transaction))
 
 (defgeneric enter-transaction (transaction disposition)
-  (:documentation "Either begin or renew the transaction, as per disposition.
-   In the former case, supply the flags")
+  (:documentation "Either begin or renew the transaction, as per disposition.")
   (:method ((transaction lmdb:transaction) (disposition (eql :begin)))
     (begin-transaction transaction :flags (transaction-flags transaction)))
   (:method ((transaction lmdb:transaction) (disposition (eql :renew)))
@@ -554,7 +549,7 @@ called by the transaction-creating thread.)
 
 ;;; database management
 
-(defgeneric open-database (database)
+(defgeneric open-database (database &key transaction)
   (:documentation "Open a database.
 Bind the dbi handle and call dbi-open to set it.
 @begin(deflist)
@@ -565,35 +560,34 @@ before another transaction may open it. Multiple concurrent transactions cannot
 open the same database.)
 
 @end(deflist)")
-  (:method ((database database))
-  (with-slots (transaction name create) database
-    (when (find database (transaction-databases transaction))
-      (error "open-database: reentrant invocation: ~s ~s." database transaction))
-    (unless (open-p transaction)
-      (error "open-database: transaction not active: ~s ~s." database transaction))
-    (unless (slot-boundp database 'handle)
-      ;; dbi-open claims to be idempotent, but anyway
-      (let* ((%handle (cffi:foreign-alloc :uint))
-             (return-code (liblmdb:dbi-open (handle transaction)
-                                            name
-                                            (logior 0
-                                                    (if create
-                                                        liblmdb:+create+
-                                                        0))
-                                            %handle)))
-        (alexandria:switch (return-code)
-          (0
-           ;; Success
-           (push database (transaction-databases transaction))
-           (setf (%handle database) %handle))
-          (liblmdb:+notfound+
-           (error 'database-not-found :name name :environment (transaction-environment transaction)))
-          (liblmdb:+dbs-full+
-           (error 'database-maximum-count :name name :environment (transaction-environment transaction)))
-          (t
-           (unknown-error return-code))))))
-  (values database
-          (handle database))))
+  (:method ((database database) &key (transaction *transaction*))
+    (with-slots (name create) database
+      (assert (open-p transaction) ()
+              "open-database: transaction not active: ~s ~s." database transaction)
+      (when (open-p database)
+        (warn "open-database: reentrant invocation: ~s ~s." database transaction))
+      (unless (slot-boundp database 'handle)
+        ;; dbi-open claims to be idempotent, but anyway
+        (let* ((%handle (cffi:foreign-alloc :uint))
+               (return-code (liblmdb:dbi-open (handle transaction)
+                                              name
+                                              (logior 0
+                                                      (if create
+                                                          liblmdb:+create+
+                                                          0))
+                                              %handle)))
+          (alexandria:switch (return-code)
+            (0
+             ;; Success
+             (setf (%handle database) %handle))
+            (liblmdb:+notfound+
+             (error 'database-not-found :name name :environment (transaction-environment transaction)))
+            (liblmdb:+dbs-full+
+             (error 'database-maximum-count :name name :environment (transaction-environment transaction)))
+            (t
+             (unknown-error return-code))))))
+    (values database
+            (handle database))))
 
 (defmethod print-object ((object database) stream)
   (let ((*print-pretty* nil))
@@ -603,8 +597,10 @@ open the same database.)
                               "?")))))
 
 
-(defgeneric drop-database  (database &key delete)
-  (:method ((database database) &key (delete 0))
+(defgeneric drop-database  (database &key delete transaction)
+  (:method ((database database) &key (delete 0) (transaction *transaction*))
+    (assert (open-p transaction) ()
+              "drop-database: transaction not active: ~s ~s." database transaction)
     (liblmdb:drop (handle transaction) (handle graph-db) delete)))
 
 ;;; cursor operations
@@ -614,6 +610,10 @@ open the same database.)
   (when (slot-boundp cursor 'handle)
     (reentrant-cursor-error :cursor cursor))
   (with-slots (database transaction) cursor
+    (assert (open-p transaction) ()
+            "open-cursor: transaction not active: ~s ~s." database transaction)
+    (assert (open-p database) ()
+            "open-cursor: database not active: ~s ~s." database transaction)
     (let* ((%handle (cffi:foreign-alloc :pointer))
            (return-code (liblmdb:cursor-open (handle transaction)
                                              (handle database)
@@ -671,63 +671,61 @@ open the same database.)
             (cffi:mem-aref array :unsigned-char i)))
     vec))
 
-(defun get (database key)
+(defun get (database key &key (transaction *transaction*))
   "Get a value from the database."
-  (with-slots (transaction) database
-    (with-val (raw-key key)
-      (with-empty-value (raw-value)
-        (let ((return-code (liblmdb:get (handle transaction)
-                                         (handle database)
-                                         raw-key
-                                         raw-value)))
-          (alexandria:switch (return-code)
-            (0
-             ;; Success
-             (values (raw-value-to-vector raw-value) t))
-            (liblmdb:+notfound+
-             (values nil nil))
-            (t
-             (unknown-error return-code))))))))
+  ;;!! no trnsaction state check
+  (with-val (raw-key key)
+    (with-empty-value (raw-value)
+      (let ((return-code (liblmdb:get (handle transaction)
+                                      (handle database)
+                                      raw-key
+                                      raw-value)))
+        (alexandria:switch (return-code)
+          (0
+           ;; Success
+           (values (raw-value-to-vector raw-value) t))
+          (liblmdb:+notfound+
+           (values nil nil))
+          (t
+           (unknown-error return-code)))))))
 
-(defun put (database key value)
+(defun put (database key value &key (transaction *transaction*))
   "Add a value to the database."
-  (with-slots (transaction) database
-    (with-val (raw-key key)
-      (with-val (raw-val value)
-        (let ((return-code (liblmdb:put (handle transaction)
-                                         (handle database)
-                                         raw-key
-                                         raw-val
-                                         0)))
-          (alexandria:switch (return-code)
-            (0
-             ;; Success
-             t)
-            (t
-             (unknown-error return-code)))))))
-  value)
-
-(defun del (database key &optional data)
-  "Delete this key from the database. Returns @c(t) if the key was found,
-@c(nil) otherwise."
-  (with-slots (transaction) database
-    (with-val (raw-key key)
-      (let ((return-code (liblmdb:del (handle transaction)
-                                       (handle database)
-                                       raw-key
-                                       (if data
-                                           data
-                                           (cffi:null-pointer)))))
+  (with-val (raw-key key)
+    (with-val (raw-val value)
+      (let ((return-code (liblmdb:put (handle transaction)
+                                      (handle database)
+                                      raw-key
+                                      raw-val
+                                      0)))
         (alexandria:switch (return-code)
           (0
            ;; Success
            t)
-          (liblmdb:+notfound+
-           nil)
-          (+eacces+
-           (error "An attempt was made to delete a key in a read-only transaction."))
           (t
-           (unknown-error return-code)))))))
+           (unknown-error return-code))))))
+  value)
+
+(defun del (database key data &key (transaction *transaction*))
+  "Delete this key from the database. Returns @c(t) if the key was found,
+@c(nil) otherwise."
+  (with-val (raw-key key)
+    (let ((return-code (liblmdb:del (handle transaction)
+                                    (handle database)
+                                    raw-key
+                                    (if data
+                                        data
+                                        (cffi:null-pointer)))))
+      (alexandria:switch (return-code)
+        (0
+         ;; Success
+         t)
+        (liblmdb:+notfound+
+         nil)
+        (+eacces+
+         (error "An attempt was made to delete a key in a read-only transaction."))
+        (t
+         (unknown-error return-code))))))
 
 (defun cursor-get (cursor operation)
   "Extract data using a cursor.
@@ -782,23 +780,22 @@ The @cl:param(operation) argument specifies the operation."
             (t
              (unknown-error return-code))))))))
 
-(defun get-with (database key operator)
+(defun get-with (database key operator &key (transaction *transaction*))
   "Get a value from the database."
-  (with-slots (transaction) database
-    (with-val (raw-key key)
-      (with-empty-value (raw-value)
-        (let ((return-code (liblmdb:get (handle transaction)
-                                         (handle database)
-                                         raw-key
-                                         raw-value)))
-          (alexandria:switch (return-code)
-            (0
-             ;; Success
-             (funcall operator raw-key raw-value))
-            (liblmdb:+notfound+
-             (values nil nil))
-            (t
-             (unknown-error return-code))))))))
+  (with-val (raw-key key)
+    (with-empty-value (raw-value)
+      (let ((return-code (liblmdb:get (handle transaction)
+                                      (handle database)
+                                      raw-key
+                                      raw-value)))
+        (alexandria:switch (return-code)
+          (0
+           ;; Success
+           (funcall operator raw-key raw-value))
+          (liblmdb:+notfound+
+           (values nil nil))
+          (t
+           (unknown-error return-code)))))))
 
 ;;; Destructors
 
@@ -836,7 +833,8 @@ in a segmentation fault.)
     (slot-makunbound environment 'handle))
   t)
 
-(defun close-database (database)
+(defun close-database (database &key (transaction *transaction*))
+
   "Close the database.
 
 @begin(deflist)
@@ -854,12 +852,10 @@ database corruption to errors like MDB_BAD_VALSIZE (since the DB name is
 gone).))
 
 @end(deflist)"
-  (with-slots (transaction name create) database
+  (with-slots (name create) database
     (liblmdb:dbi-close (handle (transaction-environment transaction))
                        (handle database))
     (release-handle database)
-    (setf (transaction-databases transaction)
-          (remove database (transaction-databases transaction)))
     t))
 
 (defun close-cursor (cursor)

@@ -7,6 +7,7 @@
    :*environment-class*
    :*transaction-class*
    :*transaction*
+   :*transactions*
    :abort-transaction
    :begin-transaction
    :close-cursor
@@ -168,13 +169,22 @@
   data)
 
 (defclass cursor ()
-  ((handle :accessor %handle
-           :initarg :handle
-           :documentation "The pointer to the cursor object.")
-   (database :reader cursor-database
-             :initarg :database
-             :type database
-             :documentation "The database the cursor belongs to."))
+  ((handle
+    :accessor %handle
+    :initarg :handle
+    :documentation "The pointer to the cursor object.")
+   (database
+    :reader cursor-database
+    :initarg :database
+    :type database
+    :documentation "The database the cursor belongs to.")
+   (transaction
+    :reader cursor-transaction
+    :initarg :transaction
+    :type transaction
+    :documentation "Th transaction which governs the cursor.
+    By default, that of the database, but for databases with indefinite
+    extent, it may be a later transaction.") )
   (:documentation "A cursor."))
 
 ;;; Constructors
@@ -253,11 +263,20 @@ floats, booleans and strings. Returns a (size . array) pair."
     (%make-value :size size
                  :data vector)))
 
-(defun make-cursor (database)
+(defun make-cursor (database &key (transaction (database-transaction database)))
   "Create a cursor object.
    The initial state leaves the handle unbound."
   (make-instance 'cursor
-                 :database database))
+    :database database
+    :transaction transaction))
+
+(defmethod initialize-instance ((instance cursor) &rest args
+                                &key (database (error "cursor: database is required"))
+                                (transaction (database-transaction database)))
+  (declare (dynamic-extent args))
+  (apply #'call-next-method instance
+         :transaction transaction
+         args))
 
 ;;; Errors
 
@@ -584,20 +603,19 @@ open the same database.)
   "Open a cursor."
   (when (slot-boundp cursor 'handle)
     (reentrant-cursor-error :cursor cursor))
-  (with-slots (database) cursor
-    (with-slots (transaction) database
-      (let* ((%handle (cffi:foreign-alloc :pointer))
-             (return-code (liblmdb:cursor-open (handle transaction)
-                                               (handle database)
-                                               %handle)))
-        (alexandria:switch (return-code)
-          (0
-           ;; Success
-           (setf (%handle cursor) %handle))
-          (22
-           (error "Invalid parameter."))
-          (t
-           (unknown-error return-code))))))
+  (with-slots (database transaction) cursor
+    (let* ((%handle (cffi:foreign-alloc :pointer))
+           (return-code (liblmdb:cursor-open (handle transaction)
+                                             (handle database)
+                                             %handle)))
+      (alexandria:switch (return-code)
+        (0
+         ;; Success
+         (setf (%handle cursor) %handle))
+        (22
+         (error "Invalid parameter."))
+        (t
+         (unknown-error return-code)))))
   cursor)
 
 ;;; Querying

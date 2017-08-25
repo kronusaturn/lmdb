@@ -129,6 +129,13 @@
            :initarg :parent
            :type (or transaction null)
            :documentation "The parent transaction, if any.")
+   (flags
+    :reader transaction-flags
+    :initarg :flags :initform liblmdb:+rdonly+
+    :type integer
+    :documentation "Flags to supply to txn_begin.
+    These are supplied at initialization as, once the transaction exists,
+    they cannot be changed.")
    (databases
     :accessor transaction-databases
     :initform nil
@@ -201,23 +208,25 @@ Before an environment can be used, it must be opened with @c(open-environment)."
                          :directory directory
                          initargs)))
     instance))
+
 (defmethod initialize-instance :before ((instance environment) &key class)
   ;; permit class initiarg
   (declare (ignore class)))
 
-(defun make-transaction (environment &rest args
-                                     &key (class *transaction-class*)
-                                     parent
-                                     &allow-other-keys)
-  "Create a transaction object."
-  (declare (dynamic-extent args)
-           (ignore parent))
-  ;; incline failed to compile
-  (let ((%handle (cffi:foreign-alloc :pointer)))
-    (apply #'make-instance class
-           :handle %handle
-           :environment environment
-           args)))
+(defgeneric make-transaction (environment &key class parent &allow-other-keys)
+  (:method ((environment environment) &rest args
+            &key (class *transaction-class*)
+            parent
+            &allow-other-keys)
+    "Create a transaction object."
+    (declare (dynamic-extent args)
+             (ignore parent))
+    ;; in-line failed to compile
+    (let ((%handle (cffi:foreign-alloc :pointer)))
+      (apply #'make-instance class
+             :handle %handle
+             :environment environment
+             args))))
 
 (defmethod initialize-instance :before ((instance transaction) &key class)
   ;; permit class initiarg
@@ -430,7 +439,7 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 ;;; transaction management
 
-(defun begin-transaction (transaction &key (flags 0))
+(defun begin-transaction (transaction &key (flags (transaction-flags transaction)))
   "Begin the transaction.
 
 @begin(deflist)
@@ -526,11 +535,12 @@ called by the transaction-creating thread.)
   (liblmdb:txn-reset (handle transaction))
   (release-transaction-databases transaction))
 
-(defgeneric enter-transaction (transaction disposition &key flags)
-  (:method ((transaction lmdb:transaction) (disposition (eql :begin)) &rest args)
-    (apply #'begin-transaction transaction args))
-  (:method ((transaction lmdb:transaction) (disposition (eql :renew)) &rest args)
-    (declare (ignore args))
+(defgeneric enter-transaction (transaction disposition)
+  (:documentation "Either begin or renew the transaction, as per disposition.
+   In the former case, supply the flags")
+  (:method ((transaction lmdb:transaction) (disposition (eql :begin)))
+    (begin-transaction transaction :flags (transaction-flags transaction)))
+  (:method ((transaction lmdb:transaction) (disposition (eql :renew)))
     (renew-transaction transaction)))
 
 (defgeneric leave-transaction (transaction disposition)
@@ -901,8 +911,7 @@ gone).))
                                  &key
                                  (normal-disposition :reset)
                                  (error-disposition :abort)
-                                 (initial-disposition :begin)
-                                 (flags () fs-p))
+                                 (initial-disposition :begin))
   "If the transaction is already established, just call the operator.
  Otherwise, wrap that call with bindings for the current and nested
  transaction, instantiate the transaction and track completion when
@@ -913,9 +922,8 @@ gone).))
         (t
          (let ((status nil)
                (*transactions* (cons transaction *transactions*))
-               (*transaction* transaction)
-               (flags-args (when fs-p `(:flags ,flags))))
-           (apply #'enter-transaction transaction initial-disposition flags-args)
+               (*transaction* transaction))
+           (enter-transaction transaction initial-disposition)
            (unwind-protect (multiple-value-prog1 (funcall op transaction)
                              (leave-transaction transaction normal-disposition)
                              (setf status normal-disposition))
@@ -925,10 +933,9 @@ gone).))
 (defmacro with-transaction ((transaction &rest options
                                          &key normal-disposition
                                          error-disposition
-                                         initial-disposition
-                                         flags)
+                                         initial-disposition)
                             &body body)
-  (declare (ignore normal-disposition error-disposition initial-disposition flags))
+  (declare (ignore normal-disposition error-disposition initial-disposition))
   (let ((op (gensym))
         (transaction-variable (if (consp transaction) (first transaction) transaction))
         (transaction-form (if (consp transaction)
@@ -941,6 +948,7 @@ gone).))
               ,@body))
        (declare (dynamic-extent #',op))
        (call-with-transaction #',op ,transaction-form ,@options))))
+
 
 (defun call-with-open-database (op database)
   (declare (dynamic-extent op))

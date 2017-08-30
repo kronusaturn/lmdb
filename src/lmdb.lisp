@@ -1,4 +1,7 @@
+;;;
+
 (in-package :cl-user)
+
 (defpackage lmdb
   (:use :cl)
   (:shadow :get)
@@ -609,6 +612,13 @@ called by the transaction-creating thread.)
 
 ;;; database management
 
+(defmethod print-object ((object database) stream)
+  (let ((*print-pretty* nil))
+    (print-unreadable-object (object stream :identity t :type t)
+      (format stream "~s" (if (slot-boundp object 'name)
+                              (slot-value object 'name)
+                              "?")))))
+
 (defgeneric open-database (database &key transaction)
   (:documentation "Open a database.
 Bind the dbi handle and call dbi-open to set it.
@@ -620,14 +630,8 @@ before another transaction may open it. Multiple concurrent transactions cannot
 open the same database.)
 
 @end(deflist)")
-  (defmethod print-object ((object database) stream)
-  (let ((*print-pretty* nil))
-    (print-unreadable-object (object stream :identity t :type t)
-      (format stream "~s" (if (slot-boundp object 'name)
-                              (slot-value object 'name)
-                              "?")))))
-
-(:method ((database database) &key (transaction *transaction*) (create nil)
+  
+  (:method ((database database) &key (transaction *transaction*) (create nil)
     (with-slots (name) database
       (assert (open-p transaction) ()
               "open-database: transaction not active: ~s ~s." database transaction)
@@ -654,10 +658,10 @@ open the same database.)
             (t
              (unknown-error return-code))))))
     (values database
-            (handle database))))
+            (handle database)))))
 
-(defun close-database (database &key (transaction *transaction*))
-
+(defgeneric close-database (database &key transaction)
+  (:documentation
   "Close the database.
 
 @begin(deflist)
@@ -674,12 +678,13 @@ transaction has modified its database. Doing so can cause misbehavior from
 database corruption to errors like MDB_BAD_VALSIZE (since the DB name is
 gone).))
 
-@end(deflist)"
-  (with-slots (name create) database
-    (liblmdb:dbi-close (handle (transaction-environment transaction))
-                       (handle database))
-    (release-handle database)
-    t))
+@end(deflist)")
+  (:method ((database database) &key (transaction *transaction*))
+    (with-slots (name create) database
+      (liblmdb:dbi-close (handle (transaction-environment transaction))
+                         (handle database))
+      (release-handle database)
+      t)))
 
 (defgeneric drop-database  (database &key delete transaction)
   (:method ((database database) &key (delete 0) (transaction *transaction*))

@@ -631,7 +631,7 @@ open the same database.)
 
 @end(deflist)")
   
-  (:method ((database database) &key (transaction *transaction*) (create nil)
+  (:method ((database database) &key (transaction *transaction*) (create nil))
     (with-slots (name) database
       (assert (open-p transaction) ()
               "open-database: transaction not active: ~s ~s." database transaction)
@@ -658,7 +658,7 @@ open the same database.)
             (t
              (unknown-error return-code))))))
     (values database
-            (handle database)))))
+            (handle database))))
 
 (defgeneric close-database (database &key transaction)
   (:documentation
@@ -680,7 +680,7 @@ gone).))
 
 @end(deflist)")
   (:method ((database database) &key (transaction *transaction*))
-    (with-slots (name create) database
+    (with-slots (name) database
       (liblmdb:dbi-close (handle (transaction-environment transaction))
                          (handle database))
       (release-handle database)

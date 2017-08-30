@@ -1012,7 +1012,7 @@ The @cl:param(operation) argument specifies the operation."
 (defmacro with-cursor ((cursor) &body body)
   "Execute the body and close the cursor."
   (let ((op (gensym "with-cursor-body-")))
-    `(flet ((,op () ,body))
+    `(flet ((,op () ,@body))
        (declare (dynamic-extent #',op))
        (call-with-open-cursor #',op ,cursor))))
 

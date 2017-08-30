@@ -1002,7 +1002,7 @@ The @cl:param(operation) argument specifies the operation."
     (open-cursor cursor)
     (unwind-protect
         (funcall op)
-      (close-cursor ,cursor))))
+      (close-cursor cursor))))
 
 (defmacro with-cursor ((cursor) &body body)
   "Execute the body and close the cursor."

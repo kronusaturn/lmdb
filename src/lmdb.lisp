@@ -92,7 +92,7 @@
 
 (defclass handle ()
   ((handle
-    :accessor %handle
+    :accessor %handle :initarg :handle
     :documentation "The handle on respective LMDB entity.
     Depending on the concrete type, the value may be a pointer or an integer.")))
 

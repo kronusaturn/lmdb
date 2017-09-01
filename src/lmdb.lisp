@@ -225,6 +225,7 @@ Before an environment can be used, it must be opened with @c(open-environment)."
   ;; permit class initarg
   (declare (ignore class args))
   (let ((%handle (cffi:foreign-alloc :pointer)))
+    (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
     (setf (%handle instance) %handle)
     (call-next-method)
     #+sbcl
@@ -512,8 +513,8 @@ in a segmentation fault.)
     (cffi:foreign-free %handle)))
                                      
 
-(defun begin-transaction (transaction &key (flags (transaction-flags transaction)))
-  "Begin the transaction.
+(defgeneric begin-transaction (transaction &key flags)
+  (:documentation "Begin the transaction.
 
 @begin(deflist)
 @term(Thread Safety)
@@ -521,21 +522,24 @@ in a segmentation fault.)
 @def(A transaction may only be used by a single thread, unless thread-local storage
  when the transaction is created.)
 
-@end(deflist)"
-  (with-slots (env parent) transaction
-    (let ((return-code (liblmdb:txn-begin (handle env)
-                                           (if parent
-                                               (handle parent)
-                                               (cffi:null-pointer))
-                                           flags
-                                           (%handle transaction))))
-      (alexandria:switch (return-code)
-        (0
-         ;; Success
-         t)
-        ;; TODO rest
-        (t
-         (unknown-error return-code))))))
+@end(deflist)")
+  (:method ((transaction transaction) &key (flags (transaction-flags transaction)))
+    (with-slots (env parent) transaction
+      (let ((%handle (%handle transaction)))
+        (when (cffi:null-pointer-p (cffi:mem-ref %handle :pointer))
+          (let ((return-code (liblmdb:txn-begin (handle env)
+                                                (if parent
+                                                    (handle parent)
+                                                    (cffi:null-pointer))
+                                                flags
+                                                %handle)))
+            (alexandria:switch (return-code)
+              (0
+               ;; Success
+               t)
+              ;; TODO rest
+              (t
+               (unknown-error return-code)))))))))
 
 (defun require-open-transaction (transaction message)
   (assert (open-p transaction) ()
@@ -581,37 +585,40 @@ called by the transaction-creating thread.)
       (liblmdb:txn-abort (handle transaction))
       (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer)))))
 
-(defun renew-transaction (transaction)
-  "Renew the transaction.
+(defgeneric renew-transaction (transaction)
+  (:documentation "Renew the transaction.
 
 @begin(deflist)
 @term(Thread Safety)
 
 @def(A transaction may only be used by a single thread.)
 
-@end(deflist)"
-  (with-slots (env parent) transaction
-    (let ((return-code (liblmdb:txn-renew (handle transaction))))
-      (alexandria:switch (return-code)
-        (0
-         ;; Success
-         t)
-        ;; TODO rest
-        (t
-         (unknown-error return-code))))))
+@end(deflist)")
+  (:method ((transaction transaction))
+    (with-slots (env parent) transaction
+      (let ((return-code (liblmdb:txn-renew (handle transaction))))
+        (alexandria:switch (return-code)
+          (0
+           ;; Success
+           t)
+          ;; TODO rest
+          (t
+           (unknown-error return-code)))))))
 
 
-(defun reset-transaction (transaction)
-  "Reset the transaction.
+(defgeneric reset-transaction (transaction)
+  (:documentation "Reset the transaction.
 
 @begin(deflist)
 @term(Thread Safety)
 
 @def(A transaction may only be used by a single thread.)
 
-@end(deflist)"
-  (require-open-transaction transaction "reset-transaction")
-  (liblmdb:txn-reset (handle transaction)))
+@end(deflist)")
+  (:method ((transaction transaction))
+    (require-open-transaction transaction "reset-transaction")
+    (liblmdb:txn-reset (handle transaction))))
+
 
 (defgeneric enter-transaction (transaction disposition)
   (:documentation "Either begin or renew the transaction, as per disposition.")

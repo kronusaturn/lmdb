@@ -223,14 +223,12 @@ Before an environment can be used, it must be opened with @c(open-environment)."
 
 (defmethod initialize-instance ((instance transaction) &rest args &key class)
   ;; permit class initarg
-  (declare (ignore class))
+  (declare (ignore class args))
   (let ((%handle (cffi:foreign-alloc :pointer)))
     (setf (%handle instance) %handle)
-    (apply #'make-instance class
-            :environment environment
-             args)
+    (call-next-method)
     #+sbcl
-    (sb-ext:finalize transaction #'(lambda () (finalize-transaction %handle)))))
+    (sb-ext:finalize instance #'(lambda () (finalize-transaction %handle)))))
 
 
 (defun make-database (name &rest initargs

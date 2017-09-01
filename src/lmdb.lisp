@@ -539,9 +539,9 @@ in a segmentation fault.)
         (t
          (unknown-error return-code))))))
 
-(defun require-open-transaction (transaction &key where)
+(defun require-open-transaction (transaction message)
   (assert (open-p transaction) ()
-          "~@~[~a: ~]transaction not open: ~s." where transaction))
+          "~@~[~a: ~]transaction not open: ~s." message transaction))
 
 
 (defgeneric commit-transaction (transaction)

@@ -200,14 +200,14 @@
 
 Before an environment can be used, it must be opened with @c(open-environment)."
   (declare (dynamic-extent initargs))
-  (let ((instance (apply #'make-instance class
-                         :directory directory
-                         initargs)))
-    instance))
+  (apply #'make-instance class
+         :directory directory
+         initargs))
 
 (defmethod initialize-instance :before ((instance environment) &key class)
   ;; permit class initiarg
   (declare (ignore class)))
+
 
 (defgeneric make-transaction (environment &key class parent &allow-other-keys)
   (:method ((environment environment) &rest args
@@ -217,16 +217,21 @@ Before an environment can be used, it must be opened with @c(open-environment)."
     "Create a transaction object."
     (declare (dynamic-extent args)
              (ignore parent))
-    ;; in-line failed to compile
-    (let ((%handle (cffi:foreign-alloc :pointer)))
-      (apply #'make-instance class
-             :handle %handle
-             :environment environment
-             args))))
+    (apply #'make-instance class
+           :environment environment
+           args)))
 
-(defmethod initialize-instance :before ((instance transaction) &key class)
-  ;; permit class initiarg
-  (declare (ignore class)))
+(defmethod initialize-instance ((instance transaction) &rest args &key class)
+  ;; permit class initarg
+  (declare (ignore class))
+  (let ((%handle (cffi:foreign-alloc :pointer)))
+    (setf (%handle instance) %handle)
+    (apply #'make-instance class
+            :environment environment
+             args)
+    #+sbcl
+    (sb-ext:finalize transaction #'(lambda () (finalize-transaction %handle)))))
+
 
 (defun make-database (name &rest initargs
                       &key (class *database-class*)
@@ -236,9 +241,10 @@ Before an environment can be used, it must be opened with @c(open-environment)."
   (apply #'make-instance class
          :name name
          initargs))
+
 (defmethod initialize-instance :before ((instance database) &key class)
   ;; permit the class initarg
-  class)
+  (declare (ignore class)))
 
 
 
@@ -495,6 +501,19 @@ in a segmentation fault.)
 
 ;;; transaction management
 
+(defun finalize-transaction (%handle)
+  "When a transaction instance is no longer reachable, examine its
+ lmdb transaction handle. Iff that is still open, abort it.
+ Finally, free the handle"
+  (let ((%txn (cffi:mem-ref %handle :pointer)))
+    (unless (cffi:null-pointer-p %txn)
+      ;; to be sure
+      (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
+      ;; then close it
+      (liblmdb:txn-abort %txn))
+    (cffi:foreign-free %handle)))
+                                     
+
 (defun begin-transaction (transaction &key (flags (transaction-flags transaction)))
   "Begin the transaction.
 
@@ -520,8 +539,13 @@ in a segmentation fault.)
         (t
          (unknown-error return-code))))))
 
-(defun commit-transaction (transaction)
-  "Commit the transaction. The transaction pointer is freed.
+(defun require-open-transaction (transaction &key where)
+  (assert (open-p transaction) ()
+          "~@~[~a: ~]transaction not open: ~s." where transaction))
+
+
+(defgeneric commit-transaction (transaction)
+  (:documentation "Commit the transaction. The transaction pointer is freed.
 
 @begin(deflist)
 @term(Thread Safety)
@@ -529,20 +553,21 @@ in a segmentation fault.)
 @def(The LMDB documentation doesn't say specifically, but assume it can only be
 called by the transaction-creating thread.)
 
-@end(deflist)"
-  (assert (open-p transaction) ()
-          "commit-transaction: transaction not active: ~s." transaction)
-  (let ((return-code (liblmdb:txn-commit (handle transaction))))
-    (alexandria:switch (return-code :test #'=)
-      (0
-       ;; Success
-       (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer))
-       t)
-      (t
-       (unknown-error return-code)))))
+@end(deflist)")
+  (:method ((transaction transaction))
+    (require-open-transaction transaction "commit-transaction")
+    (let ((return-code (liblmdb:txn-commit (handle transaction))))
+      (alexandria:switch (return-code :test #'=)
+        (0
+         ;; Success
+         (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer))
+         t)
+        (t
+         (unknown-error return-code))))))
 
-(defun abort-transaction (transaction)
-  "Abort the transaction. The transaction pointer is freed.
+
+(defgeneric abort-transaction (transaction)
+  (:documentation "Abort the transaction. The transaction pointer is freed.
 
 @begin(deflist)
 @term(Thread Safety)
@@ -550,11 +575,13 @@ called by the transaction-creating thread.)
 @def(The LMDB documentation doesn't say specifically, but assume it can only be
 called by the transaction-creating thread.)
 
-@end(deflist)"
-  (assert (open-p transaction) ()
-          "abort-transaction: transaction not active: ~s." transaction)
-  (liblmdb:txn-abort (handle transaction))
-  (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer)))
+@end(deflist)")
+  (:method ((transaction transaction))
+    (when (open-p transaction)
+      ;; allow multiple threads to close with impugnity.
+      ;; nb. provide for thread-safety elsewhere
+      (liblmdb:txn-abort (handle transaction))
+      (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer)))))
 
 (defun renew-transaction (transaction)
   "Renew the transaction.
@@ -575,6 +602,7 @@ called by the transaction-creating thread.)
         (t
          (unknown-error return-code))))))
 
+
 (defun reset-transaction (transaction)
   "Reset the transaction.
 
@@ -584,8 +612,7 @@ called by the transaction-creating thread.)
 @def(A transaction may only be used by a single thread.)
 
 @end(deflist)"
-  (assert (open-p transaction) ()
-          "reset-transaction: transaction not active: ~s." transaction)
+  (require-open-transaction transaction "reset-transaction")
   (liblmdb:txn-reset (handle transaction)))
 
 (defgeneric enter-transaction (transaction disposition)
@@ -595,8 +622,7 @@ called by the transaction-creating thread.)
   (:method ((transaction lmdb:transaction) (disposition (eql :renew)))
     (renew-transaction transaction))
   (:method ((transaction lmdb:transaction) (disposition (eql :continue)))
-    (assert (open-p transaction) ()
-            "Transaction cannot be continued - not open: ~s." transaction)
+    (require-open-transaction transaction "enter-transaction(:continue)")
     transaction))
 
 (defgeneric leave-transaction (transaction disposition)
@@ -633,8 +659,7 @@ open the same database.)
   
   (:method ((database database) &key (transaction *transaction*) (create nil))
     (with-slots (name) database
-      (assert (open-p transaction) ()
-              "open-database: transaction not active: ~s ~s." database transaction)
+      (require-open-transaction transaction "open-database")
       (when (open-p database)
         (warn "open-database: reentrant invocation: ~s ~s." database transaction))
       (unless (slot-boundp database 'handle)
@@ -688,8 +713,7 @@ gone).))
 
 (defgeneric drop-database  (database &key delete transaction)
   (:method ((database database) &key (delete 0) (transaction *transaction*))
-    (assert (open-p transaction) ()
-              "drop-database: transaction not active: ~s ~s." database transaction)
+    (require-open-transaction transaction "drop-database")
     (liblmdb:drop (handle transaction) (handle graph-db) delete)))
 
 ;;; cursor operations
@@ -699,8 +723,7 @@ gone).))
   (when (slot-boundp cursor 'handle)
     (reentrant-cursor-error :cursor cursor))
   (with-slots (database transaction) cursor
-    (assert (open-p transaction) ()
-            "open-cursor: transaction not active: ~s ~s." database transaction)
+    (require-open-transaction transaction "open-cursor")
     (assert (open-p database) ()
             "open-cursor: database not active: ~s ~s." database transaction)
     (let* ((%handle (cffi:foreign-alloc :pointer))
@@ -950,10 +973,12 @@ The @cl:param(operation) argument specifies the operation."
                (*transactions* (cons transaction *transactions*))
                (*transaction* transaction))
            (enter-transaction transaction initial-disposition)
+           (setf status initial-disposition)
            (unwind-protect (multiple-value-prog1 (funcall op transaction)
                              (leave-transaction transaction normal-disposition)
                              (setf status normal-disposition))
-             (unless status
+             (when (eq status initial-disposition)
+               (warn "leave transaction in error: ~s" transaction)
                (leave-transaction transaction error-disposition)))))))
 
 (defmacro with-transaction ((transaction &rest options

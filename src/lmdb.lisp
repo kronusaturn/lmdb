@@ -7,6 +7,7 @@
   (:shadow :get)
   (:export
    :*database-class*
+   :*debug*
    :*environment-class*
    :*transaction-class*
    :*transaction*
@@ -74,6 +75,7 @@
 (defparameter *database-class* 'database)
 (defparameter *environment-class* 'environment)
 (defparameter *transaction-class* 'transaction)
+(defvar *debug* nil)
 
 (defparameter +permissions+ #o664
   "The Unix permissions to use for the database.")
@@ -228,9 +230,22 @@ Before an environment can be used, it must be opened with @c(open-environment)."
     (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
     (setf (%handle instance) %handle)
     (call-next-method)
-    #+sbcl
-    (sb-ext:finalize instance #'(lambda () (finalize-transaction %handle)))))
+    #+(and sbcl finalize-lmdb)
+    (flet ((transaction-finalizer () (finalize-transaction %handle)))
+      ;; if the environment was already closed, this is bound to fail
+      (sb-ext:finalize instance #'transaction-finalizer))))
 
+#|
+  0: (LIBLMDB:TXN-ABORT #.(SB-SYS:INT-SAP #X006D6370))
+CORRUPTION WARNING in SBCL pid 18776(tid 137025304196864):
+Memory fault at 0x7c9fb32fb080 (pc=0x7ffff5926702, sp=0x7c9fb094cba0)
+The integrity of this image is possibly compromised.
+Continuing with fingers crossed.
+WARNING:
+   Error calling finalizer #<CLOSURE (LAMBDA () :IN INITIALIZE-INSTANCE)
+                             {109E85604B}>:
+  #<SB-SYS:MEMORY-FAULT-ERROR {100E47F943}>
+|#
 
 (defun make-database (name &rest initargs
                       &key (class *database-class*)
@@ -386,6 +401,10 @@ floats, booleans and strings. Returns a (size . array) pair."
 @def(No special considerations.)
 
 @end(deflist)")
+  (:method :around ((environment environment) &rest args)
+    (declare (dynamic-extent args) (ignore args))
+    (unless (open-p environment)
+      (call-next-method)))
   (:method ((environment environment) &key (create nil))
     (with-slots (directory) environment
       (assert (uiop:directory-pathname-p directory))
@@ -557,15 +576,18 @@ called by the transaction-creating thread.)
 
 @end(deflist)")
   (:method ((transaction transaction))
+    ;; multiple commits are an error
     (require-open-transaction transaction "commit-transaction")
-    (let ((return-code (liblmdb:txn-commit (handle transaction))))
-      (alexandria:switch (return-code :test #'=)
-        (0
-         ;; Success
-         (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer))
-         t)
-        (t
-         (unknown-error return-code))))))
+    (let ((%handle (%handle transaction))
+          (%txn (handle transaction)))
+      (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
+      (let ((return-code (liblmdb:txn-commit %txn)))
+        (alexandria:switch (return-code :test #'=)
+          (0
+           ;; Success
+           t)
+          (t
+           (unknown-error return-code)))))))
 
 
 (defgeneric abort-transaction (transaction)
@@ -579,11 +601,15 @@ called by the transaction-creating thread.)
 
 @end(deflist)")
   (:method ((transaction transaction))
+    ;; multiple aborts have no effect
     (when (open-p transaction)
       ;; allow multiple threads to close with impugnity.
       ;; nb. provide for thread-safety elsewhere
-      (liblmdb:txn-abort (handle transaction))
-      (setf (cffi:mem-ref (%handle transaction) :pointer) (cffi:null-pointer)))))
+      (let ((%handle (%handle transaction))
+            (%txn (handle transaction)))
+        (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
+        ;; if interrupted, this will leak the transaction memory
+        (liblmdb:txn-abort %txn)))))
 
 (defgeneric renew-transaction (transaction)
   (:documentation "Renew the transaction.
@@ -978,12 +1004,16 @@ The @cl:param(operation) argument specifies the operation."
                (*transactions* (cons transaction *transactions*))
                (*transaction* transaction))
            (enter-transaction transaction initial-disposition)
-           (setf status t)
-           (unwind-protect (multiple-value-prog1 (funcall op transaction)
-                             (setf status normal-disposition)
-                             (leave-transaction transaction normal-disposition))
-             (when (eq status t)
-               (warn "leave transaction in error: ~s" transaction)
+           (unwind-protect (handler-bind ((serious-condition (lambda (c) (setf status c))))
+                             (multiple-value-prog1 (funcall op transaction)
+                               (leave-transaction transaction normal-disposition)
+                               (setf status normal-disposition)))
+             (unless (eq status normal-disposition)
+               ;; distinguish an aysnchronous termination for the operation
+               ;; from an an error
+               (when (and *debug* (typep status 'serious-condition))
+                 (warn "lmdb:call-with-transaction leave transaction in unwind: ~s ~s: ~a"
+                       transaction (cffi:mem-ref (%handle transaction) :pointer) status))
                (leave-transaction transaction error-disposition)))))))
 
 (defmacro with-transaction ((transaction &rest options

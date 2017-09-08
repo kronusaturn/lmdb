@@ -235,18 +235,6 @@ Before an environment can be used, it must be opened with @c(open-environment)."
       ;; if the environment was already closed, this is bound to fail
       (sb-ext:finalize instance #'transaction-finalizer))))
 
-#|
-  0: (LIBLMDB:TXN-ABORT #.(SB-SYS:INT-SAP #X006D6370))
-CORRUPTION WARNING in SBCL pid 18776(tid 137025304196864):
-Memory fault at 0x7c9fb32fb080 (pc=0x7ffff5926702, sp=0x7c9fb094cba0)
-The integrity of this image is possibly compromised.
-Continuing with fingers crossed.
-WARNING:
-   Error calling finalizer #<CLOSURE (LAMBDA () :IN INITIALIZE-INSTANCE)
-                             {109E85604B}>:
-  #<SB-SYS:MEMORY-FAULT-ERROR {100E47F943}>
-|#
-
 (defun make-database (name &rest initargs
                       &key (class *database-class*)
                       &allow-other-keys)
@@ -384,6 +372,13 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 ;;; environment management
 
+(defmethod print-object ((object environment) stream)
+  (let ((*print-pretty* nil))
+    (print-unreadable-object (object stream :identity t :type t)
+      (format stream "~s" (if (slot-boundp object 'directory)
+                              (first (last (pathname-directory (slot-value object 'directory))))
+                              "?")))))
+
 (defgeneric check-for-stale-readers (environment)
   (:method ((env environment))
     (cffi:with-foreign-object (%count :uint32)
@@ -450,8 +445,8 @@ floats, booleans and strings. Returns a (size . array) pair."
 
 (defun finalize-environment (%handle)
   "When an environment instance is no longer reachable, examine its
- lmdb environment handle. Iff that is still open, close it.
- Finally, free the handle"
+ lmdb environment handle. Iff that is not null, the environment was never closed - close it.
+ Finally, always free the handle"
   (let ((%env (cffi:mem-ref %handle :pointer)))
     (unless (cffi:null-pointer-p %env)
       ;; to be sure
@@ -521,8 +516,8 @@ in a segmentation fault.)
 
 (defun finalize-transaction (%handle)
   "When a transaction instance is no longer reachable, examine its
- lmdb transaction handle. Iff that is still open, abort it.
- Finally, free the handle"
+ lmdb transaction handle. Iff that is not null, the transaction is still open, abort it.
+ Finally, always free the handle"
   (let ((%txn (cffi:mem-ref %handle :pointer)))
     (unless (cffi:null-pointer-p %txn)
       ;; to be sure
@@ -560,7 +555,8 @@ in a segmentation fault.)
               (t
                (unknown-error return-code)))))))))
 
-(defun require-open-transaction (transaction message)
+
+(defun require-open-transaction (transaction &optional (message nil))
   (assert (open-p transaction) ()
           "~@~[~a: ~]transaction not open: ~s." message transaction))
 
@@ -610,6 +606,7 @@ called by the transaction-creating thread.)
         (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
         ;; if interrupted, this will leak the transaction memory
         (liblmdb:txn-abort %txn)))))
+
 
 (defgeneric renew-transaction (transaction)
   (:documentation "Renew the transaction.
@@ -708,9 +705,9 @@ open the same database.)
              ;; Success
              (setf (%handle database) %handle))
             (liblmdb:+notfound+
-             (error 'database-not-found :name name :environment (transaction-environment transaction)))
+             (database-not-found :name name :environment (transaction-environment transaction)))
             (liblmdb:+dbs-full+
-             (error 'database-maximum-count :name name :environment (transaction-environment transaction)))
+             (database-maximum-count :name name :environment (transaction-environment transaction)))
             (t
              (unknown-error return-code))))))
     (values database
@@ -904,7 +901,7 @@ The @cl:param(operation) argument specifies the operation."
              (unknown-error return-code))))))))
 
 (defun cursor-get-with (cursor operation continuation)
-  "Extract data using a cursor.
+  "Extract data using a cursor with a decoding continuation.
 
 The @cl:param(operation) argument specifies the operation."
   (declare (dynamic-extent continuation))
@@ -931,7 +928,7 @@ The @cl:param(operation) argument specifies the operation."
              (unknown-error return-code))))))))
 
 (defun get-with (database key operator &key (transaction *transaction*))
-  "Get a value from the database."
+  "Get a value from the database with a decoding continuation."
   (with-val (raw-key key)
     (with-empty-value (raw-value)
       (let ((return-code (liblmdb:get (handle transaction)
@@ -947,11 +944,12 @@ The @cl:param(operation) argument specifies the operation."
           (t
            (unknown-error return-code)))))))
 
+
 ;;; Macros
 
 (defun call-with-open-environment (op environment &rest args)
   (declare (dynamic-extent op))
-  (cond ((slot-boundp environment 'handle)
+  (cond ((open-p environment)
          (funcall op))
         (t
          (apply #'open-environment environment args)
@@ -970,7 +968,7 @@ The @cl:param(operation) argument specifies the operation."
 
 (defun call-ensuring-open-environment (op environment)
   (declare (dynamic-extent op))
-  (unless (slot-boundp environment 'handle)
+  (unless (open-p environment)
     (open-environment environment))
   (funcall op))
 
@@ -1003,6 +1001,7 @@ The @cl:param(operation) argument specifies the operation."
          (let ((status nil)
                (*transactions* (cons transaction *transactions*))
                (*transaction* transaction))
+           (declare (dynamic-extent *transactions*))
            (enter-transaction transaction initial-disposition)
            (unwind-protect (handler-bind ((serious-condition (lambda (c) (setf status c))))
                              (multiple-value-prog1 (funcall op transaction)
@@ -1039,7 +1038,7 @@ The @cl:param(operation) argument specifies the operation."
 (defgeneric call-with-open-database (op database)
   (:method ((op function) (database database))
     (declare (dynamic-extent op))
-    (cond ((slot-boundp database 'handle)
+    (cond ((open-p database)
            (funcall op))
           (t
            (open-database database)
@@ -1057,12 +1056,12 @@ The @cl:param(operation) argument specifies the operation."
        (call-with-open-database #',op ,database))))
 
 (defun ensure-open-database (database)
-  (unless (slot-boundp database 'handle)
+  (unless (open-p database)
     (open-database database))
   database)
 
 (defgeneric call-with-open-cursor (op cursor)
-  (:documentation "Open a cursor for the extend of a function call")
+  (:documentation "Open a cursor for the extent of a function call")
   (:method ((op function) (cursor cursor))
     (open-cursor cursor)
     (unwind-protect
@@ -1106,8 +1105,10 @@ The @cl:param(operation) argument specifies the operation."
 
 ;;; Utilities
 
-;;; this serves to compute the key length.
-;;; if
+;;; this is a provisional operators to compute trivial keys.
+;;; it includes some logic to ensure stable key lengths, but amore stable method is
+;;; to use a structure with the appropriately typed field(s).
+
 (defun integer-to-octets (bignum)
   "Return a byte vector padded to standard integer sizes when they fit,
  that is for 4 and 8 byte words, or variable above that.

@@ -950,21 +950,31 @@ The @cl:param(operation) argument specifies the operation."
 (defun call-with-open-environment (op environment &rest args)
   (declare (dynamic-extent op))
   (cond ((open-p environment)
-         (funcall op))
+         (funcall op environment))
         (t
          (apply #'open-environment environment args)
          (unwind-protect
-             (funcall op)
+             (funcall op environment)
            (close-environment environment)))))
 
 (defmacro with-environment ((environment &rest args) &body body)
   "Execute the @cl:param(body) in a context which ensures that the @cl:param(environment) is open.
  If that is already the case, do not change the state.
  If open was necessary, close the environment upon conclusion."
-  (let ((op (gensym "with-environment-body-")))
-    `(flet ((,op () ,@body))
+  (let ((op (gensym "with-environment-body-"))
+        (environment-variable (etypecase environment
+                                (cons (first environment))
+                                (symbol environment)))
+        (environment-form (if (consp environment)
+                              (if (consp (second environment))
+                                  (second environment)
+                                  `(make-environment ,@(rest environment)))
+                              environment)))
+    `(flet ((,op (,environment-variable)
+              (declare (ignorable ,environment-variable))
+              ,@body))
        (declare (dynamic-extent #',op))
-       (call-with-open-environment #',op ,environment ,@args))))
+       (call-with-open-environment #',op ,environment-form ,@args))))
 
 (defun call-ensuring-open-environment (op environment)
   (declare (dynamic-extent op))
@@ -1022,7 +1032,9 @@ The @cl:param(operation) argument specifies the operation."
                             &body body)
   (declare (ignore normal-disposition error-disposition initial-disposition))
   (let ((op (gensym))
-        (transaction-variable (if (consp transaction) (first transaction) transaction))
+        (transaction-variable (etypecase transaction
+                                (cons (first transaction))
+                                (symbol transaction)))
         (transaction-form (if (consp transaction)
                               (if (consp (second transaction))
                                   (second transaction)

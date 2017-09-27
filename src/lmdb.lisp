@@ -685,7 +685,7 @@ open the same database.)
 
 @end(deflist)")
   
-  (:method ((database database) &key (transaction *transaction*) (create nil) (if-does-not-exist error))
+  (:method ((database database) &key (transaction *transaction*) (create nil) (if-does-not-exist :error))
     (with-slots (name) database
       (require-open-transaction transaction "open-database")
       (when (open-p database)

@@ -703,7 +703,9 @@ open the same database.)
           (alexandria:switch (return-code)
             (0
              ;; Success
-             (setf (%handle database) %handle))
+             (setf (%handle database) %handle)
+             (values database
+                     (handle database)))
             (liblmdb:+notfound+
              (ecase if-does-not-exist
                (:error
@@ -713,9 +715,7 @@ open the same database.)
             (liblmdb:+dbs-full+
              (database-maximum-count :name name :environment (transaction-environment transaction)))
             (t
-             (unknown-error return-code))))))
-    (values database
-            (handle database))))
+             (unknown-error return-code))))))))
 
 (defgeneric close-database (database &key transaction)
   (:documentation

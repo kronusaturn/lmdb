@@ -673,7 +673,7 @@ called by the transaction-creating thread.)
                               (slot-value object 'name)
                               "?")))))
 
-(defgeneric open-database (database &key transaction)
+(defgeneric open-database (database &key transaction if-does-not-exist)
   (:documentation "Open a database.
 Bind the dbi handle and call dbi-open to set it.
 @begin(deflist)
@@ -685,7 +685,7 @@ open the same database.)
 
 @end(deflist)")
   
-  (:method ((database database) &key (transaction *transaction*) (create nil))
+  (:method ((database database) &key (transaction *transaction*) (create nil) (if-does-not-exist error))
     (with-slots (name) database
       (require-open-transaction transaction "open-database")
       (when (open-p database)
@@ -705,7 +705,11 @@ open the same database.)
              ;; Success
              (setf (%handle database) %handle))
             (liblmdb:+notfound+
-             (database-not-found :name name :environment (transaction-environment transaction)))
+             (ecase if-does-not-exist
+               (:error
+                (database-not-found :name name :environment (transaction-environment transaction)))
+               ((nil)
+                nil)))
             (liblmdb:+dbs-full+
              (database-maximum-count :name name :environment (transaction-environment transaction)))
             (t

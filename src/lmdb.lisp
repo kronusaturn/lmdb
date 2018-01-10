@@ -558,7 +558,7 @@ in a segmentation fault.)
 
 (defun require-open-transaction (transaction &optional (message nil))
   (assert (open-p transaction) ()
-          "~@~[~a: ~]transaction not open: ~s." message transaction))
+          "~@[~a: ~]transaction not open: ~s." message transaction))
 
 
 (defgeneric commit-transaction (transaction)

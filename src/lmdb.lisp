@@ -673,7 +673,7 @@ called by the transaction-creating thread.)
                               (slot-value object 'name)
                               "?")))))
 
-(defgeneric open-database (database &key transaction if-does-not-exist)
+(defgeneric open-database (database &key transaction create if-does-not-exist)
   (:documentation "Open a database.
 Bind the dbi handle and call dbi-open to set it.
 @begin(deflist)
@@ -746,7 +746,7 @@ gone).))
 (defgeneric drop-database  (database &key delete transaction)
   (:method ((database database) &key (delete 0) (transaction *transaction*))
     (require-open-transaction transaction "drop-database")
-    (liblmdb:drop (handle transaction) (handle graph-db) delete)))
+    (liblmdb:drop (handle transaction) (handle database) delete)))
 
 ;;; cursor operations
 

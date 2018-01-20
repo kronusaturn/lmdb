@@ -787,21 +787,25 @@ gone).))
             (,raw-value (cffi:foreign-alloc '(:struct liblmdb:val)))
             (,array (cffi:foreign-alloc :unsigned-char
                                         :count (value-size ,value-struct))))
-       (setf (cffi:foreign-slot-value ,raw-value
-                                      '(:struct liblmdb:val)
-                                      'liblmdb:mv-size)
-             (cffi:make-pointer (value-size ,value-struct)))
+       (unwind-protect
+	 (progn
+	   (setf (cffi:foreign-slot-value ,raw-value
+					  '(:struct liblmdb:val)
+					  'liblmdb:mv-size)
+		 (cffi:make-pointer (value-size ,value-struct)))
 
-       (loop for elem across (value-data ,value-struct)
-             for i from 0 to (1- (length (value-data ,value-struct)))
-             do
-                (setf (cffi:mem-aref ,array :unsigned-char i)
-                      elem))
-       (setf (cffi:foreign-slot-value ,raw-value
-                                      '(:struct liblmdb:val)
-                                      'liblmdb:mv-data)
-             ,array)
-       ,@body)))
+	   (loop for elem across (value-data ,value-struct)
+		 for i from 0 to (1- (length (value-data ,value-struct)))
+		 do
+		 (setf (cffi:mem-aref ,array :unsigned-char i)
+		       elem))
+	   (setf (cffi:foreign-slot-value ,raw-value
+					  '(:struct liblmdb:val)
+					  'liblmdb:mv-data)
+		 ,array)
+	   ,@body)
+	 (cffi:foreign-free ,array)
+	 (cffi:foreign-free ,raw-value)))))
 
 (defmacro with-empty-value ((value) &body body)
   `(cffi:with-foreign-object (,value '(:struct liblmdb:val))

@@ -826,7 +826,17 @@ gone).))
             (cffi:mem-aref array :unsigned-char i)))
     vec))
 
-(defun get (database key &key (transaction *transaction*))
+(defun raw-value-to-string (raw-value)
+  (let* ((size (cffi:pointer-address
+                (cffi:foreign-slot-value raw-value
+                                         '(:struct liblmdb:val)
+                                         'liblmdb:mv-size)))
+         (array (cffi:foreign-slot-value raw-value
+                                         '(:struct liblmdb:val)
+                                         'liblmdb:mv-data)))
+    (cffi:foreign-string-to-lisp array :count size)))
+
+(defun get (database key &key (transaction *transaction*) (return-type ':byte-vector))
   "Get a value from the database."
   ;;!! no trnsaction state check
   (with-val (raw-key key)
@@ -838,7 +848,10 @@ gone).))
         (alexandria:switch (return-code)
           (0
            ;; Success
-           (values (raw-value-to-vector raw-value) t))
+           (values (ecase return-type
+                     (:byte-vector (raw-value-to-vector raw-value))
+                     (:string (raw-value-to-string raw-value)))
+                   t))
           (liblmdb:+notfound+
            (values nil nil))
           (t

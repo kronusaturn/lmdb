@@ -577,6 +577,7 @@ called by the transaction-creating thread.)
     (let ((%handle (%handle transaction))
           (%txn (handle transaction)))
       (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
+      #-finalize-lmdb (release-handle transaction)
       (let ((return-code (liblmdb:txn-commit %txn)))
         (alexandria:switch (return-code :test #'=)
           (0
@@ -604,6 +605,7 @@ called by the transaction-creating thread.)
       (let ((%handle (%handle transaction))
             (%txn (handle transaction)))
         (setf (cffi:mem-ref %handle :pointer) (cffi:null-pointer))
+        #-finalize-lmdb (release-handle transaction)
         ;; if interrupted, this will leak the transaction memory
         (liblmdb:txn-abort %txn)))))
 

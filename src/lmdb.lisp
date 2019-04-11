@@ -813,6 +813,14 @@ gone).))
   `(cffi:with-foreign-object (,value '(:struct liblmdb:val))
      ,@body))
 
+(defmacro with-maybe-value ((raw-value data) &body body)
+  (alexandria:with-gensyms (body-fn real-raw-value)
+    (alexandria:once-only (data)
+      `(labels ((,body-fn (,raw-value) ,@body))
+	 (if ,data
+	     (with-val (,real-raw-value ,data) (,body-fn ,real-raw-value))
+	     (with-empty-value (,real-raw-value) (,body-fn ,real-raw-value)))))))
+
 (defun raw-value-to-vector (raw-value)
   (let* ((size (cffi:pointer-address
                 (cffi:foreign-slot-value raw-value
@@ -897,18 +905,13 @@ gone).))
         (t
          (unknown-error return-code))))))
 
-(defun cursor-get (cursor operation)
+(defun cursor-get (cursor operation &optional key value)
   "Extract data using a cursor.
 
 The @cl:param(operation) argument specifies the operation."
-  (let ((op (case operation
-              (:first :+first+)
-              (:current :+current+)
-              (:last :+last+)
-              (:next :+next+)
-              (:prev :+prev+))))
-    (with-empty-value (raw-key)
-      (with-empty-value (raw-value)
+  (let ((op (intern (format nil "+~A+" operation) (find-package :keyword))))
+    (with-maybe-value (raw-key key)
+      (with-maybe-value (raw-value value)
         (let ((return-code (liblmdb:cursor-get (handle cursor)
                                                 raw-key
                                                 raw-value

@@ -432,7 +432,7 @@ floats, booleans and strings. Returns a (size . array) pair."
                                     (0
                                      ;; Success: bind the environment and configure it
                                      (setf (%handle environment) %handle)
-                                     #+sbcl
+                                     #+(and sbcl finalize-lmdb)
                                      (sb-ext:finalize environment
                                                       #'(lambda () (finalize-environment %handle)))
                                      t)

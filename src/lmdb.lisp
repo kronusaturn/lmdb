@@ -128,7 +128,7 @@
    (open-flags
     :reader environment-open-flags
     :initarg :open-flags
-    :initform 0
+    :initform LIBLMDB:+NOTLS+
     :type integer
     :documentation "Passed to env-open.
     The default value permits multiple threads."))

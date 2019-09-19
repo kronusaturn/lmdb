@@ -165,7 +165,12 @@
     :reader database-name
     :initarg :name
     :type string
-    :documentation "The database name."))
+    :documentation "The database name.")
+   (flags
+    :reader database-flags
+    :initarg :flags :initform 0
+    :type integer
+    :documentation "Flags to supply to dbi_open"))
   (:documentation "A database.
    The recommended practice is to open a database in a process once, in an
    initial read-only transaction, which commits. this leave the db open for
@@ -688,7 +693,7 @@ open the same database.)
 @end(deflist)")
   
   (:method ((database database) &key (transaction *transaction*) (create nil) (if-does-not-exist :error))
-    (with-slots (name) database
+    (with-slots (name flags) database
       (require-open-transaction transaction "open-database")
       (when (open-p database)
         (warn "open-database: reentrant invocation: ~s ~s." database transaction))
@@ -697,7 +702,7 @@ open the same database.)
         (let* ((%handle (cffi:foreign-alloc :uint))
                (return-code (liblmdb:dbi-open (handle transaction)
                                               name
-                                              (logior 0
+                                              (logior flags
                                                       (if create
                                                           liblmdb:+create+
                                                           0))
@@ -784,30 +789,34 @@ gone).))
 ;;; Querying
 
 (defmacro with-val ((raw-value data) &body body)
-  (alexandria:with-gensyms (value-struct array)
-    `(let* ((,value-struct (make-value ,data))
-            (,raw-value (cffi:foreign-alloc '(:struct liblmdb:val)))
-            (,array (cffi:foreign-alloc :unsigned-char
-                                        :count (value-size ,value-struct))))
-       (unwind-protect
-	 (progn
-	   (setf (cffi:foreign-slot-value ,raw-value
-					  '(:struct liblmdb:val)
-					  'liblmdb:mv-size)
-		 (cffi:make-pointer (value-size ,value-struct)))
+  (alexandria:with-gensyms (value-struct array body-fn)
+    (alexandria:once-only (data)
+      `(labels ((,body-fn (,raw-value) ,@body))
+	 (if ,data
+	     (let* ((,value-struct (make-value ,data))
+		    (,raw-value (cffi:foreign-alloc '(:struct liblmdb:val)))
+		    (,array (cffi:foreign-alloc :unsigned-char
+						:count (value-size ,value-struct))))
+	       (unwind-protect
+		    (progn
+		      (setf (cffi:foreign-slot-value ,raw-value
+						     '(:struct liblmdb:val)
+						     'liblmdb:mv-size)
+			    (cffi:make-pointer (value-size ,value-struct)))
 
-	   (loop for elem across (value-data ,value-struct)
-		 for i from 0 to (1- (length (value-data ,value-struct)))
-		 do
-		 (setf (cffi:mem-aref ,array :unsigned-char i)
-		       elem))
-	   (setf (cffi:foreign-slot-value ,raw-value
-					  '(:struct liblmdb:val)
-					  'liblmdb:mv-data)
-		 ,array)
-	   ,@body)
-	 (cffi:foreign-free ,array)
-	 (cffi:foreign-free ,raw-value)))))
+		      (loop for elem across (value-data ,value-struct)
+			 for i from 0 to (1- (length (value-data ,value-struct)))
+			 do
+			   (setf (cffi:mem-aref ,array :unsigned-char i)
+				 elem))
+		      (setf (cffi:foreign-slot-value ,raw-value
+						     '(:struct liblmdb:val)
+						     'liblmdb:mv-data)
+			    ,array)
+		      (,body-fn ,raw-value))
+		 (cffi:foreign-free ,array)
+		 (cffi:foreign-free ,raw-value)))
+	     (,body-fn (cffi:null-pointer)))))))
 
 (defmacro with-empty-value ((value) &body body)
   `(cffi:with-foreign-object (,value '(:struct liblmdb:val))
@@ -867,7 +876,7 @@ gone).))
           (t
            (unknown-error return-code)))))))
 
-(defun put (database key value &key (transaction *transaction*))
+(defun put (database key value &key (transaction *transaction*) (flags 0))
   "Add a value to the database."
   (with-val (raw-key key)
     (with-val (raw-val value)
@@ -875,7 +884,7 @@ gone).))
                                       (handle database)
                                       raw-key
                                       raw-val
-                                      0)))
+                                      flags)))
         (alexandria:switch (return-code)
           (0
            ;; Success
@@ -888,22 +897,21 @@ gone).))
   "Delete this key from the database. Returns @c(t) if the key was found,
 @c(nil) otherwise."
   (with-val (raw-key key)
-    (let ((return-code (liblmdb:del (handle transaction)
-                                    (handle database)
-                                    raw-key
-                                    (if data
-                                        data
-                                        (cffi:null-pointer)))))
-      (alexandria:switch (return-code)
-        (0
-         ;; Success
-         t)
-        (liblmdb:+notfound+
-         nil)
-        (+eacces+
-         (error "An attempt was made to delete a key in a read-only transaction."))
-        (t
-         (unknown-error return-code))))))
+    (with-val (raw-data data)
+      (let ((return-code (liblmdb:del (handle transaction)
+                                      (handle database)
+                                      raw-key
+				      raw-data)))
+        (alexandria:switch (return-code)
+	  (0
+	   ;; Success
+	   t)
+	  (liblmdb:+notfound+
+	   nil)
+	  (+eacces+
+	   (error "An attempt was made to delete a key in a read-only transaction."))
+	  (t
+	   (unknown-error return-code)))))))
 
 (defun cursor-get (cursor operation &optional key value)
   "Extract data using a cursor.

@@ -34,6 +34,7 @@
    :environment-directory
    :environment-info
    :environment-statistics
+   :database-statistics
    :get
    :lmdb-error
    :make-cursor
@@ -488,6 +489,24 @@ in a segmentation fault.)
   (cffi:with-foreign-object (stat '(:struct liblmdb:stat))
     (liblmdb:env-stat (handle environment)
                        stat)
+    (macrolet ((slot (slot)
+                 `(cffi:foreign-slot-value stat
+                                           '(:struct liblmdb:stat)
+                                           ',slot)))
+      (list :page-size (slot liblmdb:ms-psize)
+            :depth (slot liblmdb:ms-depth)
+            :branch-pages (slot liblmdb:ms-branch-pages)
+            :leaf-pages (slot liblmdb:ms-leaf-pages)
+            :overflow-pages (slot liblmdb:ms-overflow-pages)
+            :entries (slot liblmdb:ms-entries)
+            ))))
+
+(defun database-statistics (db &key (transaction *transaction*))
+  "Return statistics about the database."
+  (cffi:with-foreign-object (stat '(:struct liblmdb:stat))
+    (liblmdb:stat (handle transaction)
+		  (handle db)
+		  stat)
     (macrolet ((slot (slot)
                  `(cffi:foreign-slot-value stat
                                            '(:struct liblmdb:stat)

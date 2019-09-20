@@ -927,8 +927,8 @@ The @cl:param(operation) argument specifies the operation."
           (alexandria:switch (return-code)
             (0
              ;; Success
-             (values (raw-value-to-vector raw-key)
-                     (raw-value-to-vector raw-value)))
+             (values (raw-value-to-vector raw-value)
+                     (raw-value-to-vector raw-key)))
             (liblmdb:+notfound+
              (values nil nil))
             (t

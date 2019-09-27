@@ -874,6 +874,11 @@ gone).))
                                          'liblmdb:mv-data)))
     (cffi:foreign-string-to-lisp array :count size)))
 
+(defun raw-value-to-lisp (return-type raw-value)
+  (ecase return-type
+    (:string (raw-value-to-string raw-value))
+    (:byte-vector (raw-value-to-vector raw-value))))
+
 (defun get (database key &key (transaction *transaction*) (return-type ':byte-vector))
   "Get a value from the database."
   ;;!! no trnsaction state check
@@ -886,9 +891,7 @@ gone).))
         (alexandria:switch (return-code)
           (0
            ;; Success
-           (values (ecase return-type
-                     (:byte-vector (raw-value-to-vector raw-value))
-                     (:string (raw-value-to-string raw-value)))
+           (values (raw-value-to-lisp return-type raw-value)
                    t))
           (liblmdb:+notfound+
            (values nil nil))
@@ -932,7 +935,7 @@ gone).))
 	  (t
 	   (unknown-error return-code)))))))
 
-(defun cursor-get (cursor operation &optional key value)
+(defun cursor-get (cursor operation &optional key value &key (return-type :byte-vector))
   "Extract data using a cursor.
 
 The @cl:param(operation) argument specifies the operation."
@@ -946,8 +949,8 @@ The @cl:param(operation) argument specifies the operation."
           (alexandria:switch (return-code)
             (0
              ;; Success
-             (values (raw-value-to-vector raw-value)
-                     (raw-value-to-vector raw-key)))
+             (values (raw-value-to-lisp return-type raw-value)
+                     (raw-value-to-lisp return-type raw-key)))
             (liblmdb:+notfound+
              (values nil nil))
             (t

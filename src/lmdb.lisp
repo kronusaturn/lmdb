@@ -811,30 +811,33 @@ gone).))
   (alexandria:with-gensyms (value-struct array body-fn)
     (alexandria:once-only (data)
       `(labels ((,body-fn (,raw-value) ,@body))
+	 (declare (dynamic-extent #',body-fn))
 	 (if ,data
-	     (let* ((,value-struct (make-value ,data))
-		    (,raw-value (cffi:foreign-alloc '(:struct liblmdb:val)))
-		    (,array (cffi:foreign-alloc :unsigned-char
-						:count (value-size ,value-struct))))
-	       (unwind-protect
-		    (progn
-		      (setf (cffi:foreign-slot-value ,raw-value
-						     '(:struct liblmdb:val)
-						     'liblmdb:mv-size)
-			    (cffi:make-pointer (value-size ,value-struct)))
-
-		      (loop for elem across (value-data ,value-struct)
-			 for i from 0 to (1- (length (value-data ,value-struct)))
-			 do
-			   (setf (cffi:mem-aref ,array :unsigned-char i)
-				 elem))
-		      (setf (cffi:foreign-slot-value ,raw-value
-						     '(:struct liblmdb:val)
-						     'liblmdb:mv-data)
-			    ,array)
-		      (,body-fn ,raw-value))
-		 (cffi:foreign-free ,array)
-		 (cffi:foreign-free ,raw-value)))
+	     (let* ((,value-struct (make-value ,data)))
+	       (cffi:with-foreign-object (,raw-value '(:struct liblmdb:val))
+		 (progn
+		   (setf (cffi:foreign-slot-value ,raw-value
+						  '(:struct liblmdb:val)
+						  'liblmdb:mv-size)
+			 (cffi:make-pointer (value-size ,value-struct)))
+		   (etypecase (value-data ,value-struct)
+		     (#+sbcl (simple-array (unsigned-byte 8) (*)) #-sbcl nil
+		      (cffi:with-pointer-to-vector-data (,array (value-data ,value-struct))
+			(setf (cffi:foreign-slot-value ,raw-value
+						       '(:struct liblmdb:val)
+						       'liblmdb:mv-data)
+			      ,array)
+			(,body-fn ,raw-value)))
+		     (vector
+		      (cffi:with-foreign-pointer (,array (value-size ,value-struct))
+			(setf (cffi:foreign-slot-value ,raw-value
+						       '(:struct liblmdb:val)
+						       'liblmdb:mv-data)
+			      ,array)
+			(loop for elem across (value-data ,value-struct)
+			   for i from 0 to (1- (length (value-data ,value-struct)))
+			   do (setf (cffi:mem-aref ,array :unsigned-char i) elem))
+			(,body-fn ,raw-value)))))))
 	     (,body-fn (cffi:null-pointer)))))))
 
 (defmacro with-empty-value ((value) &body body)
@@ -845,6 +848,7 @@ gone).))
   (alexandria:with-gensyms (body-fn real-raw-value)
     (alexandria:once-only (data)
       `(labels ((,body-fn (,raw-value) ,@body))
+	 (declare (dynamic-extent #',body-fn))
 	 (if ,data
 	     (with-val (,real-raw-value ,data) (,body-fn ,real-raw-value))
 	     (with-empty-value (,real-raw-value) (,body-fn ,real-raw-value)))))))

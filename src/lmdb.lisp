@@ -853,35 +853,38 @@ gone).))
 	     (with-val (,real-raw-value ,data) (,body-fn ,real-raw-value))
 	     (with-empty-value (,real-raw-value) (,body-fn ,real-raw-value)))))))
 
-(defun raw-value-to-vector (raw-value)
+(defun call-with-raw-data (fn raw-value)
   (let* ((size (cffi:pointer-address
-                (cffi:foreign-slot-value raw-value
-                                         '(:struct liblmdb:val)
-                                         'liblmdb:mv-size)))
-         (array (cffi:foreign-slot-value raw-value
-                                         '(:struct liblmdb:val)
-                                         'liblmdb:mv-data))
-         (vec (make-array size
-                          :element-type '(unsigned-byte 8))))
-    (loop for i from 0 to (1- size) do
-      (setf (elt vec i)
-            (cffi:mem-aref array :unsigned-char i)))
-    vec))
+		(cffi:foreign-slot-value raw-value
+					 '(:struct liblmdb:val)
+					 'liblmdb:mv-size)))
+	 (array (cffi:foreign-slot-value raw-value
+					 '(:struct liblmdb:val)
+					 'liblmdb:mv-data)))
+    (funcall fn array size)))
+
+(defun raw-value-to-vector (raw-value)
+  (call-with-raw-data
+   (lambda (array size)
+     (let ((vec (make-array size
+			    :element-type '(unsigned-byte 8))))
+       (loop for i from 0 to (1- size) do
+	    (setf (elt vec i)
+		  (cffi:mem-aref array :unsigned-char i)))
+       vec))
+   raw-value))
 
 (defun raw-value-to-string (raw-value)
-  (let* ((size (cffi:pointer-address
-                (cffi:foreign-slot-value raw-value
-                                         '(:struct liblmdb:val)
-                                         'liblmdb:mv-size)))
-         (array (cffi:foreign-slot-value raw-value
-                                         '(:struct liblmdb:val)
-                                         'liblmdb:mv-data)))
-    (cffi:foreign-string-to-lisp array :count size)))
+  (call-with-raw-data
+   (lambda (array size)
+     (cffi:foreign-string-to-lisp array :count size))
+   raw-value))
 
 (defun raw-value-to-lisp (return-type raw-value)
-  (ecase return-type
-    (:string (raw-value-to-string raw-value))
-    (:byte-vector (raw-value-to-vector raw-value))))
+  (etypecase return-type
+    ((member :string) (raw-value-to-string raw-value))
+    ((member :byte-vector) (raw-value-to-vector raw-value))
+    ((or function symbol) (call-with-raw-data return-type raw-value))))
 
 (defun get (database key &key (transaction *transaction*) (return-type ':byte-vector))
   "Get a value from the database."

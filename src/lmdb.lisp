@@ -22,6 +22,7 @@
    :condition-name
    :cursor
    :cursor-get
+   :cursor-del
    :database
    :database-maximum-count
    :database-not-found
@@ -962,6 +963,16 @@ The @cl:param(operation) argument specifies the operation."
              (values nil nil))
             (t
              (unknown-error return-code))))))))
+
+(defun cursor-del (cursor &optional (flags 0))
+  (let ((return-code (liblmdb:cursor-del (handle cursor) flags)))
+    (alexandria:switch (return-code)
+      (0 ; Success
+       t)
+      (+eacces+
+       (error "An attempt was made to delete a key in a read-only transaction."))
+      (t
+       (unknown-error return-code)))))
 
 (defun cursor-get-with (cursor operation continuation)
   "Extract data using a cursor with a decoding continuation.

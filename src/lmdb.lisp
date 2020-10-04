@@ -943,7 +943,7 @@ gone).))
 	  (t
 	   (unknown-error return-code)))))))
 
-(defun cursor-get (cursor operation &optional key value &key (return-type :byte-vector))
+(defun cursor-get (cursor operation &optional key value &key (return-type :byte-vector) (key-return-type return-type))
   "Extract data using a cursor.
 
 The @cl:param(operation) argument specifies the operation."
@@ -958,7 +958,7 @@ The @cl:param(operation) argument specifies the operation."
             (0
              ;; Success
              (values (raw-value-to-lisp return-type raw-value)
-                     (raw-value-to-lisp return-type raw-key)))
+                     (raw-value-to-lisp key-return-type raw-key)))
             (liblmdb:+notfound+
              (values nil nil))
             (t
